@@ -220,7 +220,7 @@ end;
 $$;
 
 insert into public.tisch_events (name, slug)
-values ('Feuerwehrfest', 'feuerwehrfest')
+values ('Jugendfeuerwehr Steinbergkirche', 'feuerwehrfest')
 on conflict (slug) do nothing;
 
 insert into public.tisch_tables (event_id, name)

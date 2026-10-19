@@ -32,7 +32,7 @@ db.exec(`
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
 `);
-db.prepare("INSERT OR IGNORE INTO events (id, name, slug) VALUES (1, 'Feuerwehrfest', 'feuerwehrfest')").run();
+db.prepare("INSERT OR IGNORE INTO events (id, name, slug) VALUES (1, 'Jugendfeuerwehr Steinbergkirche', 'feuerwehrfest')").run();
 
 function tableExists(name: string): boolean {
   return Boolean(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(name));
