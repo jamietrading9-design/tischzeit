@@ -1,6 +1,6 @@
-# Tischzeit
+# Jugendfeuerwehr Steinbergkirche
 
-Tischzeit is a locally runnable TypeScript web app for event and club catering. Guests order from their table using a QR code; staff manage the menu, kitchen queue, tables and cash payments from one dashboard.
+Eine lokal ausführbare TypeScript-Web-App für Bestellungen bei Veranstaltungen. Gäste bestellen per QR-Code direkt am Tisch; das Team verwaltet Speisekarte, Küche, Tische und Barzahlungen im Personalbereich.
 
 ## Start locally
 
@@ -13,7 +13,7 @@ npm run dev
 
 Before the first start, run `npm run setup:admin` and choose a private username and password. Open [http://localhost:5173](http://localhost:5173) for the staff dashboard. Open [http://localhost:5173/e/feuerwehrfest?t=1](http://localhost:5173/e/feuerwehrfest?t=1) to try the guest menu for table 1.
 
-The first start creates `data/tischzeit.sqlite` and seeds a sample event with twelve tables and a menu. The SQLite database stays on this machine. `npm run setup:admin` writes a salted scrypt password hash into the ignored local `.env` file; the plaintext password is not saved. `.env.example` documents the settings. By default, the development and API servers listen only on this computer. For a deliberate server deployment, configure a private account, set `HOST=0.0.0.0`, and configure a firewall and HTTPS.
+The first start creates a local SQLite database in `data/` and seeds a sample event with twelve tables and a menu. The database stays on this machine. `npm run setup:admin` writes a salted scrypt password hash into the ignored local `.env` file; the plaintext password is not saved. `.env.example` documents the settings. By default, the development and API servers listen only on this computer. For a deliberate server deployment, configure a private account, set `HOST=0.0.0.0`, and configure a firewall and HTTPS.
 
 To build the production assets and type-check the client and server:
 

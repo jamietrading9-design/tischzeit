@@ -16,6 +16,7 @@ type Order = {
 type EventSummary = { id: number; name: string; slug: string; created_at: string };
 type PublicData = { venueName: string; eventSlug: string; products: Product[]; tables: Table[] };
 
+const ORGANIZATION_NAME = "Jugendfeuerwehr Steinbergkirche";
 const euro = (cents: number) => new Intl.NumberFormat("de-DE", { style: "currency", currency: "EUR" }).format(cents / 100);
 const shortId = (id: string) => id.slice(0, 5).toUpperCase();
 const request = async <T,>(path: string, options: RequestInit = {}, eventId?: number): Promise<T> => {
@@ -42,8 +43,8 @@ function App() {
 function LegalPage({ kind }: { kind: "imprint" | "privacy" }) {
   const isImprint = kind === "imprint";
   return <main className="legal-page">
-    <header className="guest-header"><a className="brand" href="/"><span className="brand-mark"><Utensils size={18} /></span><span>tischzeit</span></a><a className="text-button" href="/">Zurück zur Startseite <ArrowLeft size={15} /></a></header>
-    <article className="legal-content"><span className="eyebrow">TISCHZEIT · MUSTERVORLAGE</span><h1>{isImprint ? "Impressum" : "Datenschutzerklärung"}<span className="title-period">.</span></h1><div className="legal-notice"><CircleHelp size={19} /><p><strong>Bitte vor dem Einsatz ausfüllen.</strong> Diese Vorlage ist keine Rechtsberatung. Ersetze alle Angaben in eckigen Klammern durch die tatsächlichen Veranstalterdaten und lass die Texte bei Bedarf rechtlich prüfen.</p></div>
+    <header className="guest-header"><a className="brand" href="/"><span className="brand-mark"><Flame size={18} /></span><span className="brand-name">{ORGANIZATION_NAME}</span></a><a className="text-button" href="/">Zurück zur Startseite <ArrowLeft size={15} /></a></header>
+    <article className="legal-content"><span className="eyebrow">{ORGANIZATION_NAME.toLocaleUpperCase("de-DE")} · MUSTERVORLAGE</span><h1>{isImprint ? "Impressum" : "Datenschutzerklärung"}<span className="title-period">.</span></h1><div className="legal-notice"><CircleHelp size={19} /><p><strong>Bitte vor dem Einsatz ausfüllen.</strong> Diese Vorlage ist keine Rechtsberatung. Ersetze alle Angaben in eckigen Klammern durch die tatsächlichen Veranstalterdaten und lass die Texte bei Bedarf rechtlich prüfen.</p></div>
       {isImprint ? <>
         <h2>Angaben gemäß § 5 DDG</h2><p>[Name des Vereins / Veranstalters]<br />[Vertretungsberechtigte Person]<br />[Straße und Hausnummer]<br />[PLZ und Ort]</p>
         <h2>Kontakt</h2><p>Telefon: [Telefonnummer]<br />E-Mail: [E-Mail-Adresse]</p>
@@ -100,19 +101,18 @@ function GuestApp({ eventSlug, requestedTable }: { eventSlug: string; requestedT
     } catch (e) { setError((e as Error).message); } finally { setBusy(false); }
   };
 
-  if (!data && !error) return <div className="loading"><div className="brand-mark"><Utensils size={19} /></div><span>Die Karte wird gedeckt …</span></div>;
-  if (order) return <GuestConfirmation order={order} venueName={data?.venueName ?? "Tischzeit"} onMore={() => setOrder(null)} />;
+  if (!data && !error) return <div className="loading"><div className="brand-mark"><Flame size={19} /></div><span>Speisekarte wird geladen …</span></div>;
+  if (order) return <GuestConfirmation order={order} venueName={data?.venueName ?? ORGANIZATION_NAME} onMore={() => setOrder(null)} />;
 
   return (
     <main className="guest-page">
       <header className="guest-header">
-        <a className="brand" href="/"><span className="brand-mark"><Utensils size={18} /></span><span>tischzeit</span></a>
-        <span className="guest-event-name">{data?.venueName ?? "Speisekarte"}</span>
+        <a className="brand" href="/"><span className="brand-mark"><Flame size={18} /></span><span className="brand-name">{ORGANIZATION_NAME}</span></a>
       </header>
       <section className="guest-hero">
         <div className="hero-copy">
           <span className="eyebrow"><span className="eyebrow-line" /> SPEISEKARTE</span>
-          <h1 className="venue-title">{data?.venueName ?? "Tischzeit"}<br /><em>Speisekarte.</em></h1>
+          <h1 className="venue-title">{data?.venueName ?? ORGANIZATION_NAME}<br /><em>Speisekarte.</em></h1>
           <p>Wähle deine Bestellung. Bezahlt wird später an der Kasse.</p>
           <label className="table-select"><Utensils size={17} /><span>Dein Platz</span>
             <select value={tableId} onChange={(event) => setTableId(Number(event.target.value))}>
@@ -127,7 +127,7 @@ function GuestApp({ eventSlug, requestedTable }: { eventSlug: string; requestedT
         </div>
       </section>
       <section className="menu-section">
-        <div className="section-title"><div><span className="eyebrow">{data?.venueName ?? "Tischzeit"}</span><h2>Speisekarte<span className="title-period">.</span></h2></div><span className="menu-count">{data?.products.length ?? 0} Produkte</span></div>
+        <div className="section-title"><div><span className="eyebrow">{data?.venueName ?? ORGANIZATION_NAME}</span><h2>Speisekarte<span className="title-period">.</span></h2></div><span className="menu-count">{data?.products.length ?? 0} Produkte</span></div>
         <nav className="category-tabs">{categories.map((item) => <button key={item} onClick={() => setCategory(item)} className={category === item ? "category-tab active" : "category-tab"}>{item}</button>)}</nav>
         {error && <div className="notice error-notice">{error}</div>}
         <div className="product-grid">
@@ -147,7 +147,7 @@ function GuestApp({ eventSlug, requestedTable }: { eventSlug: string; requestedT
           {!visibleProducts.length && <p className="empty-state">Gerade ist hier nichts auf der Karte.</p>}
         </div>
       </section>
-      <footer className="guest-footer"><a className="brand" href={`/e/${encodeURIComponent(eventSlug)}?t=${tableId}`}><span className="brand-mark"><Utensils size={16} /></span><span>tischzeit</span></a><span>{data?.venueName} · <a href="/impressum">Impressum</a> · <a href="/datenschutz">Datenschutz</a></span></footer>
+      <footer className="guest-footer"><a className="brand" href={`/e/${encodeURIComponent(eventSlug)}?t=${tableId}`}><span className="brand-mark"><Flame size={16} /></span><span className="brand-name">{ORGANIZATION_NAME}</span></a><span><a href="/impressum">Impressum</a> · <a href="/datenschutz">Datenschutz</a></span></footer>
       {cartCount > 0 && <div className="cart-bar"><div className="cart-summary"><span className="cart-count">{cartCount}</span><span>Artikel</span><strong>{euro(total)}</strong></div><button className="primary-button" onClick={submitOrder} disabled={busy}>{busy ? "Wird gesendet …" : <>Bestellung abschicken <ArrowRight size={17} /></>}</button></div>}
     </main>
   );
@@ -155,7 +155,7 @@ function GuestApp({ eventSlug, requestedTable }: { eventSlug: string; requestedT
 
 function GuestConfirmation({ order, venueName, onMore }: { order: Order; venueName: string; onMore: () => void }) {
   return <main className="confirmation-page">
-    <a className="brand" href="/"><span className="brand-mark"><Utensils size={18} /></span><span>tischzeit</span></a>
+    <a className="brand" href="/"><span className="brand-mark"><Flame size={18} /></span><span className="brand-name">{ORGANIZATION_NAME}</span></a>
     <div className="confirmation-card"><div className="confirmation-icon"><BadgeCheck size={34} /></div><span className="eyebrow">BESTELLUNG EINGEGANGEN</span><h1>Danke für<br /><em>deine Bestellung.</em></h1><p>Die Küche hat deine Bestellung erhalten. Sie wird an deinen Tisch gebracht.</p>
       <div className="confirmation-details"><span>Deine Bestellung <strong>#{shortId(order.id)}</strong></span><span>{order.table_name}</span><hr />{order.items.map((item, i) => <span key={`${item.product_name}-${i}`}>{item.quantity} × {item.product_name}<strong>{euro(item.quantity * item.unit_price_cents)}</strong></span>)}<hr /><span>Gesamtbetrag<strong>{euro(order.total_cents)}</strong></span></div>
       <div className="cash-note"><Banknote size={18} /><span>Die Zahlung erfolgt bar an der Kasse.</span></div><button className="text-button" onClick={onMore}>Weitere Bestellung <ArrowRight size={16} /></button>
@@ -242,7 +242,7 @@ function StaffApp() {
     } catch (e) { setError((e as Error).message); }
   };
 
-  if (!isLoggedIn) return <main className="login-page"><div className="login-brand brand"><span className="brand-mark"><Utensils size={18} /></span><span>tischzeit</span><span className="staff-pill">PERSONAL</span></div><form className="login-card" onSubmit={login}><div className="login-icon"><LayoutDashboard size={24} /></div><span className="eyebrow">SCHÖN, DASS DU DA BIST</span><h1>Der Überblick<span className="title-period">.</span></h1><p>Melde dich mit deinem Veranstalter-Konto an.</p><label className="field-label" htmlFor="staff-username">Benutzername<input autoFocus id="staff-username" className="text-input" autoComplete="username" required maxLength={64} value={username} onChange={(e) => setUsername(e.target.value)} /></label><label className="field-label" htmlFor="staff-password">Passwort<input id="staff-password" className="text-input" autoComplete="current-password" required type="password" maxLength={128} value={password} onChange={(e) => setPassword(e.target.value)} /></label><button className="primary-button full-button">Anmelden <ArrowRight size={17} /></button>{error && <p className="inline-error">{error}</p>}</form></main>;
+  if (!isLoggedIn) return <main className="login-page"><div className="login-brand brand"><span className="brand-mark"><Flame size={18} /></span><span className="brand-name">{ORGANIZATION_NAME}</span><span className="staff-pill">PERSONAL</span></div><form className="login-card" onSubmit={login}><div className="login-icon"><LayoutDashboard size={24} /></div><span className="eyebrow">PERSONALBEREICH</span><h1>Anmelden<span className="title-period">.</span></h1><p>Melde dich mit deinem Veranstalter-Konto an.</p><label className="field-label" htmlFor="staff-username">Benutzername<input autoFocus id="staff-username" className="text-input" autoComplete="username" required maxLength={64} value={username} onChange={(e) => setUsername(e.target.value)} /></label><label className="field-label" htmlFor="staff-password">Passwort<input id="staff-password" className="text-input" autoComplete="current-password" required type="password" maxLength={128} value={password} onChange={(e) => setPassword(e.target.value)} /></label><button className="primary-button full-button">Anmelden <ArrowRight size={17} /></button>{error && <p className="inline-error">{error}</p>}</form></main>;
 
   if (!activeEvent) return <main className="loading"><div className="brand-mark"><Utensils size={19} /></div><span>Veranstaltungen werden geladen …</span></main>;
 
@@ -257,7 +257,7 @@ function StaffApp() {
   ];
 
   return <div className="admin-shell">
-    <aside className="sidebar"><a className="brand sidebar-brand" href="/"><span className="brand-mark"><Utensils size={18} /></span><span>tischzeit</span></a><div className="sidebar-label">VERANSTALTUNG</div><div className="event-name"><span className="event-icon"><Flame size={17} /></span><select aria-label="Veranstaltung wählen" value={activeEventId} onChange={(event) => { const id = Number(event.target.value); setActiveEventId(id); localStorage.setItem("active-event-id", String(id)); }} className="event-picker">{events.map((item) => <option value={item.id} key={item.id}>{item.name}</option>)}</select><button className="add-event-button" title="Veranstaltung erstellen" onClick={() => setModal("event")}><Plus size={17} /></button></div><div className="sidebar-label nav-label">ARBEITSBEREICH</div><nav className="side-nav">{nav.map(({ id, label, icon: Icon, count }) => <button key={id} onClick={() => setTab(id)} className={`nav-item ${tab === id ? "selected" : ""}`}><Icon size={17} /><span>{label}</span>{count ? <span className="nav-count">{count}</span> : null}</button>)}</nav><div className="sidebar-bottom"><div className="sidebar-help"><CircleHelp size={17} /><span>Alles im Griff?</span><ArrowRight size={14} /></div><div className="staff-profile"><div className="avatar">{username.slice(0, 2).toUpperCase()}</div><div><strong>{username}</strong><small>Veranstalter</small></div><button title="Abmelden" className="logout-button" onClick={async () => { try { await request("/api/staff/logout", { method: "POST" }); } finally { localStorage.removeItem("staff-username"); setLoggedIn(false); } }}><ArrowDownLeft size={16} /></button></div></div></aside>
+    <aside className="sidebar"><a className="brand sidebar-brand" href="/"><span className="brand-mark"><Flame size={18} /></span><span className="brand-name">{ORGANIZATION_NAME}</span></a><div className="sidebar-label">VERANSTALTUNG</div><div className="event-name"><span className="event-icon"><Flame size={17} /></span><select aria-label="Veranstaltung wählen" value={activeEventId} onChange={(event) => { const id = Number(event.target.value); setActiveEventId(id); localStorage.setItem("active-event-id", String(id)); }} className="event-picker">{events.map((item) => <option value={item.id} key={item.id}>{item.name}</option>)}</select><button className="add-event-button" title="Veranstaltung erstellen" onClick={() => setModal("event")}><Plus size={17} /></button></div><div className="sidebar-label nav-label">ARBEITSBEREICH</div><nav className="side-nav">{nav.map(({ id, label, icon: Icon, count }) => <button key={id} onClick={() => setTab(id)} className={`nav-item ${tab === id ? "selected" : ""}`}><Icon size={17} /><span>{label}</span>{count ? <span className="nav-count">{count}</span> : null}</button>)}</nav><div className="sidebar-bottom"><div className="sidebar-help"><CircleHelp size={17} /><span>Alles im Griff?</span><ArrowRight size={14} /></div><div className="staff-profile"><div className="avatar">{username.slice(0, 2).toUpperCase()}</div><div><strong>{username}</strong><small>Veranstalter</small></div><button title="Abmelden" className="logout-button" onClick={async () => { try { await request("/api/staff/logout", { method: "POST" }); } finally { localStorage.removeItem("staff-username"); setLoggedIn(false); } }}><ArrowDownLeft size={16} /></button></div></div></aside>
     <main className="admin-main"><header className="admin-topbar"><div className="breadcrumb">{activeEvent.name} <span>/</span> {nav.find((item) => item.id === tab)?.label}</div><div className="topbar-right"><span className="open-indicator"><span className="live-dot" /> Betrieb läuft</span><button className="icon-button" title="Aktualisieren" onClick={() => void loadAll()}><Clock3 size={18} /></button><div className="avatar small-avatar">{username.slice(0, 2).toUpperCase()}</div></div></header>
       <div className="admin-content">
         {error && <div className="notice error-notice">{error}<button onClick={() => setError("")}><X size={15} /></button></div>}
@@ -387,7 +387,7 @@ function ReceiptModal({ order, venueName, onClose }: { order: Order; venueName: 
   const paidAt = order.paid_at
     ? new Date(order.paid_at.endsWith("Z") ? order.paid_at : `${order.paid_at.replace(" ", "T")}Z`)
     : new Date();
-  return <ModalShell onClose={onClose}><div className="modal-card receipt-modal"><div className="receipt-top"><div className="receipt-brand"><Flame size={16} /> {venueName}</div><strong className="receipt-heading">Zahlungsbeleg</strong><span>Barzahlung · Bestellung #{shortId(order.id)}</span></div><div className="receipt-rule" /><div className="receipt-meta"><span>{order.table_name}</span><span>{paidAt.toLocaleString("de-DE")}</span></div><div className="receipt-rule" />{order.items.map((item, i) => <div className="receipt-line" key={`${item.product_name}-${i}`}><span>{item.quantity} × {item.product_name}</span><strong>{euro(item.quantity * item.unit_price_cents)}</strong></div>)}<div className="receipt-rule" /><div className="receipt-line"><span>Warenwert</span><strong>{euro(order.total_cents)}</strong></div>{order.tip_cents > 0 && <div className="receipt-line"><span>Trinkgeld</span><strong>{euro(order.tip_cents)}</strong></div>}<div className="receipt-total"><span>Bar bezahlt</span><strong>{euro(order.total_cents + order.tip_cents)}</strong></div><p className="receipt-legal">Vereinfachter Bewirtungsbeleg. Kein TSE-Kassenbeleg.</p><p className="receipt-thanks">Vielen Dank für deinen Besuch.</p><div className="modal-actions no-print"><button className="subtle-button" onClick={onClose}>Schließen</button><button className="primary-button" onClick={() => window.print()}><Printer size={16} /> Beleg drucken</button></div></div></ModalShell>;
+  return <ModalShell onClose={onClose}><div className="modal-card receipt-modal"><div className="receipt-top"><div className="receipt-brand"><Flame size={16} /> {venueName}</div><strong className="receipt-heading">Kassenbeleg</strong></div><div className="receipt-rule" /><div className="receipt-meta"><span>Bestellung #{shortId(order.id)}</span><span>{order.table_name}</span><span>{paidAt.toLocaleString("de-DE")}</span><span>Zahlungsart: Bar</span></div><div className="receipt-rule" />{order.items.map((item, i) => <div className="receipt-item" key={`${item.product_name}-${i}`}><div className="receipt-line"><span>{item.product_name}</span><strong>{euro(item.quantity * item.unit_price_cents)}</strong></div><small>{item.quantity} × {euro(item.unit_price_cents)}</small></div>)}<div className="receipt-rule" /><div className="receipt-line"><span>Warenwert</span><strong>{euro(order.total_cents)}</strong></div>{order.tip_cents > 0 && <div className="receipt-line"><span>Trinkgeld</span><strong>{euro(order.tip_cents)}</strong></div>}<div className="receipt-rule" /><div className="receipt-total"><span>Gesamtbetrag</span><strong>{euro(order.total_cents + order.tip_cents)}</strong></div><p className="receipt-legal">Einfacher Zahlungsbeleg. Kein TSE-Kassenbeleg.</p><p className="receipt-thanks">Vielen Dank für deinen Besuch.</p><div className="modal-actions no-print"><button className="subtle-button" onClick={onClose}>Schließen</button><button className="primary-button" onClick={() => window.print()}><Printer size={16} /> Beleg drucken</button></div></div></ModalShell>;
 }
 function ModalShell({ children, onClose }: { children: React.ReactNode; onClose: () => void }) {
   return <div className="modal-backdrop" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}><div className="modal-position">{children}</div></div>;
