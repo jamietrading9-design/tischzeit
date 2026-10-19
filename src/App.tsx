@@ -107,7 +107,7 @@ function GuestApp({ eventSlug, requestedTable }: { eventSlug: string; requestedT
     <main className="guest-page">
       <header className="guest-header">
         <a className="brand" href="/"><span className="brand-mark"><Utensils size={18} /></span><span>tischzeit</span></a>
-        <span className="guest-header-note"><span className="live-dot" />{data?.venueName ?? "Speisekarte"}</span>
+        <span className="guest-event-name">{data?.venueName ?? "Speisekarte"}</span>
       </header>
       <section className="guest-hero">
         <div className="hero-copy">
