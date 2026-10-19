@@ -29,6 +29,12 @@ After cloning the repository to the server, run `npm ci` and `npm run setup:admi
 
 GitHub stores the project and runs the build workflow; it does not host the backend or guest ordering site. To let guests scan QR codes using their phones, the server needs a public HTTPS address. A private Tailscale address such as `100.x.x.x` is only reachable by devices connected to that private network.
 
+## Public test deployment (GitHub + Vercel + Supabase)
+
+Vercel runs the Express app and serves the built frontend; GitHub remains the source repository and triggers deployments when the connected production branch changes. In Vercel, import this repository and add `SUPABASE_URL`, `SUPABASE_SECRET_KEY`, `ADMIN_USERNAME`, and `ADMIN_PASSWORD_HASH` as production environment variables. The two admin values can be copied from the private local `.env`; keep the Supabase secret key marked sensitive. Deploy the production branch to get a public HTTPS link. The Vercel adapter keeps SQLite's unused fallback file in temporary storage; order data is stored in Supabase.
+
+The Vercel Hobby and Supabase Free plans are for testing, not guaranteed always-on production. Supabase may pause a Free project after a week of low activity. Vercel Hobby is intended for personal, non-commercial projects. Check both providers' current terms and upgrade to suitable paid plans before relying on this for sales or live events.
+
 ## Supabase database backend
 
 Supabase provides the hosted PostgreSQL database; the Node.js server still needs to run on your Ubuntu host or another application host. Install the official Supabase CLI and authenticate it with `supabase login`, then link the project and apply migrations from the repository root:

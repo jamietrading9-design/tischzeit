@@ -9,5 +9,5 @@
     "outDir": "dist-server",
     "types": ["node"]
   },
-  "include": ["server", "scripts"]
+  "include": ["index.ts", "server", "scripts"]
 }

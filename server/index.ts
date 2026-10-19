@@ -17,7 +17,8 @@ if (Boolean(supabaseUrl) !== Boolean(supabaseKey)) {
 const supabase = supabaseUrl && supabaseKey
   ? createClient(supabaseUrl, supabaseKey, { auth: { autoRefreshToken: false, persistSession: false } })
   : null;
-const dataPath = resolve(process.env.DATABASE_PATH ?? `${here}/../data/tischzeit.sqlite`);
+const defaultDataPath = process.env.VERCEL === "1" ? "/tmp/tischzeit.sqlite" : `${here}/../data/tischzeit.sqlite`;
+const dataPath = resolve(process.env.DATABASE_PATH ?? defaultDataPath);
 mkdirSync(dirname(dataPath), { recursive: true });
 
 const db = new Database(dataPath);
@@ -708,7 +709,7 @@ app.patch("/api/staff/tables/:id", staffOnly, activeEvent, async (req, res) => {
   res.json({ table: db.prepare("SELECT * FROM tables WHERE id = ?").get(id) });
 });
 
-const webRoot = resolve(here, "../dist");
+const webRoot = resolve(process.cwd(), "public");
 app.use(express.static(webRoot));
 app.get(["/impressum", "/datenschutz"], (_req, res, next) => {
   res.sendFile(resolve(webRoot, "index.html"), (error) => {
@@ -737,6 +738,10 @@ app.use((error: Error, _req: Request, res: Response, _next: NextFunction) => {
 
 const port = Number(process.env.PORT ?? 3001);
 const host = process.env.HOST ?? "127.0.0.1";
-app.listen(port, host, () => {
-  console.log(`Tischzeit API läuft auf http://localhost:${port}`);
-});
+if (process.env.VERCEL !== "1") {
+  app.listen(port, host, () => {
+    console.log(`Tischzeit API läuft auf http://localhost:${port}`);
+  });
+}
+
+export default app;

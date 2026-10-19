@@ -1,0 +1,18 @@
+{
+  "framework": "express",
+  "buildCommand": "npm run build",
+  "rewrites": [
+    {
+      "source": "/e/:slug",
+      "destination": "/index.html"
+    },
+    {
+      "source": "/impressum",
+      "destination": "/index.html"
+    },
+    {
+      "source": "/datenschutz",
+      "destination": "/index.html"
+    }
+  ]
+}
