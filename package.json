@@ -6,11 +6,12 @@
   "scripts": {
     "dev": "concurrently -k \"tsx watch server/index.ts\" \"vite\"",
     "build": "tsc -p tsconfig.server.json && tsc -p tsconfig.app.json && vite build",
-    "start": "node dist-server/index.js",
+    "start": "node dist-server/server/index.js",
     "setup:admin": "tsx scripts/setup-admin.ts",
     "preview": "vite preview"
   },
   "dependencies": {
+    "@supabase/supabase-js": "^2.118.0",
     "better-sqlite3": "^12.2.0",
     "dotenv": "^16.6.1",
     "express": "^5.1.0",

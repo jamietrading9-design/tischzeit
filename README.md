@@ -29,6 +29,18 @@ After cloning the repository to the server, run `npm ci` and `npm run setup:admi
 
 GitHub stores the project and runs the build workflow; it does not host the backend or guest ordering site. To let guests scan QR codes using their phones, the server needs a public HTTPS address. A private Tailscale address such as `100.x.x.x` is only reachable by devices connected to that private network.
 
+## Supabase database backend
+
+Supabase provides the hosted PostgreSQL database; the Node.js server still needs to run on your Ubuntu host or another application host. Install the official Supabase CLI and authenticate it with `supabase login`, then link the project and apply migrations from the repository root:
+
+```sh
+supabase projects list
+supabase link --project-ref <project-ref>
+supabase db push
+```
+
+`supabase link` asks for the database password in the terminal. Do not put it in a command, chat message, or repository file. Add `SUPABASE_URL` and the server-side `SUPABASE_SECRET_KEY` (or legacy service-role key) to the uncommitted `.env` on the application host. Never use the public anon/publishable key as a server secret, and never commit the server key. When both variables are configured, orders, events, sessions, menus, and tables use Supabase PostgreSQL. The database tables use row-level security without public access policies; only the private server key is used to access them. Without these variables, local development continues to use SQLite.
+
 ## Included
 
 - Guest menu with table selection, cart, item notes and order confirmation

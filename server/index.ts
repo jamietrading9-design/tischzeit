@@ -1,6 +1,7 @@
 import express, { type Request, type Response, type NextFunction } from "express";
 import "dotenv/config";
 import Database from "better-sqlite3";
+import { createClient } from "@supabase/supabase-js";
 import { createHash, randomBytes, randomUUID, scryptSync, timingSafeEqual } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
@@ -8,6 +9,14 @@ import { fileURLToPath } from "node:url";
 import { z } from "zod";
 
 const here = dirname(fileURLToPath(import.meta.url));
+const supabaseUrl = process.env.SUPABASE_URL;
+const supabaseKey = process.env.SUPABASE_SECRET_KEY ?? process.env.SUPABASE_SERVICE_ROLE_KEY;
+if (Boolean(supabaseUrl) !== Boolean(supabaseKey)) {
+  throw new Error("SUPABASE_URL und SUPABASE_SECRET_KEY müssen gemeinsam gesetzt werden.");
+}
+const supabase = supabaseUrl && supabaseKey
+  ? createClient(supabaseUrl, supabaseKey, { auth: { autoRefreshToken: false, persistSession: false } })
+  : null;
 const dataPath = resolve(process.env.DATABASE_PATH ?? `${here}/../data/tischzeit.sqlite`);
 mkdirSync(dirname(dataPath), { recursive: true });
 
@@ -131,6 +140,23 @@ addEventDefaults(1);
 
 const app = express();
 app.use(express.json({ limit: "64kb" }));
+app.get("/healthz", async (_req, res) => {
+  if (supabase) {
+    const { error } = await supabase.from("tisch_events").select("id").limit(1);
+    if (error) {
+      res.status(503).json({ status: "unavailable", storage: "supabase" });
+      return;
+    }
+    res.json({ status: "ok", storage: "supabase" });
+    return;
+  }
+  const result = db.pragma("quick_check", { simple: true });
+  if (result !== "ok") {
+    res.status(503).json({ status: "unavailable", storage: "sqlite" });
+    return;
+  }
+  res.json({ status: "ok", storage: "sqlite" });
+});
 
 type Product = { id: number; name: string; description: string; category: string; price_cents: number; available: number };
 type Order = {
@@ -151,6 +177,39 @@ const sessionCookie = "tischzeit_session";
 const sessionDurationMs = 8 * 60 * 60 * 1000;
 const failedLogins = new Map<string, { count: number; resetAt: number }>();
 
+function cloudError(error: { message: string; code?: string }): Error {
+  return new Error(error.code === "23505" ? "Dieser Eintrag existiert bereits." : error.message);
+}
+
+async function cloudEvent(slug: string): Promise<EventRecord | undefined> {
+  if (!supabase) return undefined;
+  const { data, error } = await supabase.from("tisch_events").select("id, name, slug, created_at").eq("slug", slug).maybeSingle();
+  if (error) throw cloudError(error);
+  return data as EventRecord | undefined;
+}
+
+async function cloudOrder(id: string, eventId?: number): Promise<Order | undefined> {
+  if (!supabase) return undefined;
+  let ordersQuery = supabase.from("tisch_orders").select("*").eq("id", id);
+  if (eventId !== undefined) ordersQuery = ordersQuery.eq("event_id", eventId);
+  const { data: order, error: orderError } = await ordersQuery.maybeSingle();
+  if (orderError) throw cloudError(orderError);
+  if (!order) return undefined;
+  const [{ data: table, error: tableError }, { data: items, error: itemsError }] = await Promise.all([
+    supabase.from("tisch_tables").select("name").eq("event_id", order.event_id).eq("id", order.table_id).single(),
+    supabase.from("tisch_order_items").select("product_name, quantity, unit_price_cents, note").eq("order_id", id).order("id"),
+  ]);
+  if (tableError) throw cloudError(tableError);
+  if (itemsError) throw cloudError(itemsError);
+  return {
+    ...order,
+    table_name: table.name,
+    created_at: new Date(order.created_at).toISOString(),
+    paid_at: order.paid_at ? new Date(order.paid_at).toISOString() : null,
+    items: items ?? [],
+  } as Order;
+}
+
 const productInput = z.object({
   name: z.string().trim().min(1).max(80),
   description: z.string().trim().max(240).default(""),
@@ -167,7 +226,7 @@ const orderInput = z.object({
   })).min(1).max(40),
 });
 
-function staffOnly(req: Request, res: Response, next: NextFunction) {
+async function staffOnly(req: Request, res: Response, next: NextFunction) {
   const rawCookie = req.headers.cookie?.split("; ").find((part) => part.startsWith(`${sessionCookie}=`));
   const token = rawCookie?.slice(sessionCookie.length + 1);
   if (!token) {
@@ -175,7 +234,12 @@ function staffOnly(req: Request, res: Response, next: NextFunction) {
     return;
   }
   const tokenHash = createHash("sha256").update(token).digest("hex");
-  const session = db.prepare("SELECT token_hash FROM staff_sessions WHERE token_hash = ? AND expires_at > datetime('now')").get(tokenHash);
+  const session = supabase
+    ? await supabase.from("tisch_staff_sessions").select("token_hash").eq("token_hash", tokenHash).gt("expires_at", new Date().toISOString()).maybeSingle().then(({ data, error }) => {
+      if (error) throw cloudError(error);
+      return data;
+    })
+    : db.prepare("SELECT token_hash FROM staff_sessions WHERE token_hash = ? AND expires_at > datetime('now')").get(tokenHash);
   if (!session) {
     res.setHeader("Set-Cookie", `${sessionCookie}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0`);
     res.status(401).json({ error: "Deine Sitzung ist abgelaufen. Bitte melde dich erneut an." });
@@ -185,9 +249,17 @@ function staffOnly(req: Request, res: Response, next: NextFunction) {
   next();
 }
 
-function activeEvent(req: Request, res: Response, next: NextFunction) {
+async function activeEvent(req: Request, res: Response, next: NextFunction) {
   const eventId = Number(req.get("x-event-id"));
-  if (!Number.isSafeInteger(eventId) || eventId < 1 || !db.prepare("SELECT 1 FROM events WHERE id = ?").get(eventId)) {
+  const event = Number.isSafeInteger(eventId) && eventId > 0
+    ? supabase
+      ? await supabase.from("tisch_events").select("id").eq("id", eventId).maybeSingle().then(({ data, error }) => {
+        if (error) throw cloudError(error);
+        return data;
+      })
+      : db.prepare("SELECT 1 FROM events WHERE id = ?").get(eventId)
+    : undefined;
+  if (!event) {
     res.status(400).json({ error: "Bitte wähle zuerst eine Veranstaltung aus." });
     return;
   }
@@ -200,7 +272,8 @@ function pathParam(req: Request, name: string): string | undefined {
   return typeof value === "string" ? value : undefined;
 }
 
-function getOrder(id: string): Order | undefined {
+async function getOrder(id: string): Promise<Order | undefined> {
+  if (supabase) return cloudOrder(id);
   const order = db.prepare(`
     SELECT orders.*, tables.name AS table_name
     FROM orders JOIN tables ON tables.id = orders.table_id WHERE orders.id = ?
@@ -211,21 +284,36 @@ function getOrder(id: string): Order | undefined {
   return { ...order, items };
 }
 
-app.get("/api/public/:slug", (req, res) => {
+app.get("/api/public/:slug", async (req, res) => {
   const slug = pathParam(req, "slug");
-  const event = slug && db.prepare("SELECT id, name, slug FROM events WHERE slug = ?").get(slug) as EventRecord | undefined;
+  const event = slug
+    ? supabase ? await cloudEvent(slug) : db.prepare("SELECT id, name, slug FROM events WHERE slug = ?").get(slug) as EventRecord | undefined
+    : undefined;
   if (!event) {
     res.status(404).json({ error: "Diese Veranstaltung wurde nicht gefunden." });
     return;
   }
-  const products = db.prepare("SELECT id, name, description, category, price_cents FROM products WHERE event_id = ? AND available = 1 ORDER BY category, name").all(event.id);
-  const tables = db.prepare("SELECT id, name FROM tables WHERE event_id = ? AND active = 1 ORDER BY id").all(event.id);
+  const [products, tables] = supabase
+    ? await Promise.all([
+      supabase.from("tisch_products").select("id, name, description, category, price_cents").eq("event_id", event.id).eq("available", true).order("category").order("name"),
+      supabase.from("tisch_tables").select("id, name").eq("event_id", event.id).eq("active", true).order("id"),
+    ]).then(([productResult, tableResult]) => {
+      if (productResult.error) throw cloudError(productResult.error);
+      if (tableResult.error) throw cloudError(tableResult.error);
+      return [productResult.data, tableResult.data];
+    })
+    : [
+      db.prepare("SELECT id, name, description, category, price_cents FROM products WHERE event_id = ? AND available = 1 ORDER BY category, name").all(event.id),
+      db.prepare("SELECT id, name FROM tables WHERE event_id = ? AND active = 1 ORDER BY id").all(event.id),
+    ];
   res.json({ venueName: event.name, eventSlug: event.slug, products, tables });
 });
 
-app.post("/api/events/:slug/orders", (req, res) => {
+app.post("/api/events/:slug/orders", async (req, res) => {
   const slug = pathParam(req, "slug");
-  const event = slug && db.prepare("SELECT id, name, slug FROM events WHERE slug = ?").get(slug) as EventRecord | undefined;
+  const event = slug
+    ? supabase ? await cloudEvent(slug) : db.prepare("SELECT id, name, slug FROM events WHERE slug = ?").get(slug) as EventRecord | undefined
+    : undefined;
   if (!event) {
     res.status(404).json({ error: "Diese Veranstaltung wurde nicht gefunden." });
     return;
@@ -233,6 +321,26 @@ app.post("/api/events/:slug/orders", (req, res) => {
   const parsed = orderInput.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: "Bitte prüfe deine Bestellung." });
+    return;
+  }
+  if (supabase) {
+    const { data, error: orderError } = await supabase.rpc("tisch_place_order", {
+      p_event_slug: event.slug,
+      p_table_id: parsed.data.tableId,
+      p_items: parsed.data.items,
+    });
+    if (orderError) {
+      if (orderError.code === "P0002") {
+        res.status(404).json({ error: "Diese Veranstaltung wurde nicht gefunden." });
+        return;
+      }
+      if (["22023", "23503", "23514"].includes(orderError.code ?? "")) {
+        res.status(400).json({ error: orderError.message });
+        return;
+      }
+      throw cloudError(orderError);
+    }
+    res.status(201).json({ order: data as Order });
     return;
   }
   const table = db.prepare("SELECT id FROM tables WHERE event_id = ? AND id = ? AND active = 1").get(event.id, parsed.data.tableId);
@@ -264,18 +372,20 @@ app.post("/api/events/:slug/orders", (req, res) => {
     }
   });
   createOrder();
-  res.status(201).json({ order: getOrder(id) });
+  res.status(201).json({ order: await getOrder(id) });
 });
 
-app.get("/api/events/:slug/orders/:id", (req, res) => {
+app.get("/api/events/:slug/orders/:id", async (req, res) => {
   const slug = pathParam(req, "slug");
   const id = pathParam(req, "id");
-  const event = slug && db.prepare("SELECT id FROM events WHERE slug = ?").get(slug) as { id: number } | undefined;
+  const event = slug
+    ? supabase ? await cloudEvent(slug) : db.prepare("SELECT id FROM events WHERE slug = ?").get(slug) as { id: number } | undefined
+    : undefined;
   if (!event || !id) {
     res.status(404).json({ error: "Bestellung nicht gefunden." });
     return;
   }
-  const order = getOrder(id);
+  const order = supabase ? await cloudOrder(id, event.id) : await getOrder(id);
   if (!order || order.event_id !== event.id) {
     res.status(404).json({ error: "Bestellung nicht gefunden." });
     return;
@@ -283,7 +393,7 @@ app.get("/api/events/:slug/orders/:id", (req, res) => {
   res.json({ order });
 });
 
-app.post("/api/staff/login", (req, res) => {
+app.post("/api/staff/login", async (req, res) => {
   const ip = req.ip ?? "unknown";
   const attempts = failedLogins.get(ip);
   if (attempts && attempts.resetAt > Date.now() && attempts.count >= 8) {
@@ -313,26 +423,47 @@ app.post("/api/staff/login", (req, res) => {
     return;
   }
   failedLogins.delete(ip);
-  db.prepare("DELETE FROM staff_sessions WHERE expires_at <= datetime('now')").run();
   const token = randomBytes(32).toString("hex");
   const tokenHash = createHash("sha256").update(token).digest("hex");
-  db.prepare("INSERT INTO staff_sessions (token_hash, expires_at) VALUES (?, datetime('now', '+8 hours'))").run(tokenHash);
+  if (supabase) {
+    const { error: cleanupError } = await supabase.from("tisch_staff_sessions").delete().lte("expires_at", new Date().toISOString());
+    if (cleanupError) throw cloudError(cleanupError);
+    const { error } = await supabase.from("tisch_staff_sessions").insert({
+      token_hash: tokenHash,
+      expires_at: new Date(Date.now() + sessionDurationMs).toISOString(),
+    });
+    if (error) throw cloudError(error);
+  } else {
+    db.prepare("DELETE FROM staff_sessions WHERE expires_at <= datetime('now')").run();
+    db.prepare("INSERT INTO staff_sessions (token_hash, expires_at) VALUES (?, datetime('now', '+8 hours'))").run(tokenHash);
+  }
   const secure = process.env.NODE_ENV === "production" ? "; Secure" : "";
   res.setHeader("Set-Cookie", `${sessionCookie}=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${sessionDurationMs / 1000}${secure}`);
   res.json({ ok: true });
 });
 
-app.post("/api/staff/logout", staffOnly, (_req, res) => {
-  db.prepare("DELETE FROM staff_sessions WHERE token_hash = ?").run(res.locals.sessionTokenHash);
+app.post("/api/staff/logout", staffOnly, async (_req, res) => {
+  if (supabase) {
+    const { error } = await supabase.from("tisch_staff_sessions").delete().eq("token_hash", res.locals.sessionTokenHash);
+    if (error) throw cloudError(error);
+  } else {
+    db.prepare("DELETE FROM staff_sessions WHERE token_hash = ?").run(res.locals.sessionTokenHash);
+  }
   res.setHeader("Set-Cookie", `${sessionCookie}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0${process.env.NODE_ENV === "production" ? "; Secure" : ""}`);
   res.json({ ok: true });
 });
 
-app.get("/api/staff/events", staffOnly, (_req, res) => {
+app.get("/api/staff/events", staffOnly, async (_req, res) => {
+  if (supabase) {
+    const { data, error } = await supabase.from("tisch_events").select("id, name, slug, created_at").order("id", { ascending: false });
+    if (error) throw cloudError(error);
+    res.json({ events: data });
+    return;
+  }
   res.json({ events: db.prepare("SELECT id, name, slug, created_at FROM events ORDER BY id DESC").all() });
 });
 
-app.post("/api/staff/events", staffOnly, (req, res) => {
+app.post("/api/staff/events", staffOnly, async (req, res) => {
   const body = z.object({ name: z.string().trim().min(2).max(80) }).safeParse(req.body);
   if (!body.success) {
     res.status(400).json({ error: "Der Veranstaltungsname muss mindestens 2 Zeichen haben." });
@@ -341,6 +472,12 @@ app.post("/api/staff/events", staffOnly, (req, res) => {
   const slugBase = body.data.name.normalize("NFKD").replace(/[\u0300-\u036f]/g, "")
     .toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 48) || "veranstaltung";
   const slug = `${slugBase}-${randomBytes(3).toString("hex")}`;
+  if (supabase) {
+    const { data, error } = await supabase.rpc("tisch_create_event", { p_name: body.data.name, p_slug: slug });
+    if (error) throw cloudError(error);
+    res.status(201).json({ event: data as EventRecord });
+    return;
+  }
   const create = db.transaction(() => {
     const result = db.prepare("INSERT INTO events (name, slug) VALUES (?, ?)").run(body.data.name, slug);
     const id = Number(result.lastInsertRowid);
@@ -350,8 +487,25 @@ app.post("/api/staff/events", staffOnly, (req, res) => {
   res.status(201).json({ event: create() });
 });
 
-app.get("/api/staff/orders", staffOnly, activeEvent, (_req, res) => {
+app.get("/api/staff/orders", staffOnly, activeEvent, async (_req, res) => {
   const eventId = res.locals.eventId as number;
+  if (supabase) {
+    const { data, error } = await supabase.from("tisch_orders")
+      .select("*")
+      .eq("event_id", eventId)
+      .order("created_at", { ascending: false })
+      .limit(200);
+    if (error) throw cloudError(error);
+    const eventOrders = await Promise.all((data ?? []).map((order) => cloudOrder(order.id, eventId)));
+    const orders = eventOrders.filter((order): order is Order => order !== undefined)
+      .sort((a, b) => {
+        const statusOrder = { new: 0, preparing: 1, ready: 2, paid: 3 };
+        return statusOrder[a.status as keyof typeof statusOrder] - statusOrder[b.status as keyof typeof statusOrder]
+          || b.created_at.localeCompare(a.created_at);
+      });
+    res.json({ orders });
+    return;
+  }
   const rows = db.prepare(`
     SELECT orders.*, tables.name AS table_name
     FROM orders JOIN tables ON tables.id = orders.table_id
@@ -362,7 +516,7 @@ app.get("/api/staff/orders", staffOnly, activeEvent, (_req, res) => {
   res.json({ orders: rows.map((order) => ({ ...order, items: db.prepare("SELECT product_name, quantity, unit_price_cents, note FROM order_items WHERE order_id = ? ORDER BY id").all(order.id) })) });
 });
 
-app.patch("/api/staff/orders/:id", staffOnly, activeEvent, (req, res) => {
+app.patch("/api/staff/orders/:id", staffOnly, activeEvent, async (req, res) => {
   const eventId = res.locals.eventId as number;
   const id = pathParam(req, "id");
   if (!id) {
@@ -377,6 +531,20 @@ app.patch("/api/staff/orders/:id", staffOnly, activeEvent, (req, res) => {
     res.status(400).json({ error: "Ungültige Aktualisierung." });
     return;
   }
+  if (supabase) {
+    const update = await supabase.from("tisch_orders").update({
+      status: body.data.status,
+      ...(body.data.tipCents === undefined ? {} : { tip_cents: body.data.tipCents }),
+      ...(body.data.status === "paid" ? { paid_at: new Date().toISOString() } : {}),
+    }).eq("id", id).eq("event_id", eventId).select("id").maybeSingle();
+    if (update.error) throw cloudError(update.error);
+    if (!update.data) {
+      res.status(404).json({ error: "Bestellung nicht gefunden." });
+      return;
+    }
+    res.json({ order: await cloudOrder(id, eventId) });
+    return;
+  }
   const update = db.prepare(`
     UPDATE orders SET status = ?, tip_cents = COALESCE(?, tip_cents),
       paid_at = CASE WHEN ? = 'paid' THEN datetime('now') ELSE paid_at END
@@ -386,17 +554,36 @@ app.patch("/api/staff/orders/:id", staffOnly, activeEvent, (req, res) => {
     res.status(404).json({ error: "Bestellung nicht gefunden." });
     return;
   }
-  res.json({ order: getOrder(id) });
+  res.json({ order: await getOrder(id) });
 });
 
-app.get("/api/staff/products", staffOnly, activeEvent, (_req, res) => {
+app.get("/api/staff/products", staffOnly, activeEvent, async (_req, res) => {
+  if (supabase) {
+    const { data, error } = await supabase.from("tisch_products").select("*").eq("event_id", res.locals.eventId).order("category").order("name");
+    if (error) throw cloudError(error);
+    res.json({ products: data });
+    return;
+  }
   res.json({ products: db.prepare("SELECT * FROM products WHERE event_id = ? ORDER BY category, name").all(res.locals.eventId) });
 });
 
-app.post("/api/staff/products", staffOnly, activeEvent, (req, res) => {
+app.post("/api/staff/products", staffOnly, activeEvent, async (req, res) => {
   const body = productInput.safeParse(req.body);
   if (!body.success) {
     res.status(400).json({ error: "Bitte prüfe Name, Kategorie und Preis." });
+    return;
+  }
+  if (supabase) {
+    const { data, error } = await supabase.from("tisch_products").insert({
+      event_id: res.locals.eventId,
+      name: body.data.name,
+      description: body.data.description,
+      category: body.data.category,
+      price_cents: body.data.priceCents,
+      available: body.data.available,
+    }).select("*").single();
+    if (error) throw cloudError(error);
+    res.status(201).json({ product: data });
     return;
   }
   const result = db.prepare("INSERT INTO products (event_id, name, description, category, price_cents, available) VALUES (?, ?, ?, ?, ?, ?)")
@@ -404,7 +591,7 @@ app.post("/api/staff/products", staffOnly, activeEvent, (req, res) => {
   res.status(201).json({ product: db.prepare("SELECT * FROM products WHERE id = ?").get(result.lastInsertRowid) });
 });
 
-app.patch("/api/staff/products/:id", staffOnly, activeEvent, (req, res) => {
+app.patch("/api/staff/products/:id", staffOnly, activeEvent, async (req, res) => {
   const id = pathParam(req, "id");
   if (!id) {
     res.status(400).json({ error: "Ungültige Produktnummer." });
@@ -413,6 +600,22 @@ app.patch("/api/staff/products/:id", staffOnly, activeEvent, (req, res) => {
   const body = productInput.safeParse(req.body);
   if (!body.success) {
     res.status(400).json({ error: "Bitte prüfe Name, Kategorie und Preis." });
+    return;
+  }
+  if (supabase) {
+    const { data, error } = await supabase.from("tisch_products").update({
+      name: body.data.name,
+      description: body.data.description,
+      category: body.data.category,
+      price_cents: body.data.priceCents,
+      available: body.data.available,
+    }).eq("id", id).eq("event_id", res.locals.eventId).select("*").maybeSingle();
+    if (error) throw cloudError(error);
+    if (!data) {
+      res.status(404).json({ error: "Produkt nicht gefunden." });
+      return;
+    }
+    res.json({ product: data });
     return;
   }
   const result = db.prepare("UPDATE products SET name = ?, description = ?, category = ?, price_cents = ?, available = ? WHERE id = ? AND event_id = ?")
@@ -424,14 +627,35 @@ app.patch("/api/staff/products/:id", staffOnly, activeEvent, (req, res) => {
   res.json({ product: db.prepare("SELECT * FROM products WHERE id = ?").get(id) });
 });
 
-app.get("/api/staff/tables", staffOnly, activeEvent, (_req, res) => {
+app.get("/api/staff/tables", staffOnly, activeEvent, async (_req, res) => {
+  if (supabase) {
+    const { data, error } = await supabase.from("tisch_tables").select("*").eq("event_id", res.locals.eventId).order("id");
+    if (error) throw cloudError(error);
+    res.json({ tables: data });
+    return;
+  }
   res.json({ tables: db.prepare("SELECT * FROM tables WHERE event_id = ? ORDER BY id").all(res.locals.eventId) });
 });
 
-app.post("/api/staff/tables", staffOnly, activeEvent, (req, res) => {
+app.post("/api/staff/tables", staffOnly, activeEvent, async (req, res) => {
   const body = z.object({ name: z.string().trim().min(1).max(40) }).safeParse(req.body);
   if (!body.success) {
     res.status(400).json({ error: "Bitte einen Tischnamen eingeben." });
+    return;
+  }
+  if (supabase) {
+    const { data, error } = await supabase.from("tisch_tables").insert({
+      event_id: res.locals.eventId,
+      name: body.data.name,
+    }).select("*").single();
+    if (error) {
+      if (error.code === "23505") {
+        res.status(409).json({ error: "Diesen Tischnamen gibt es bereits." });
+        return;
+      }
+      throw cloudError(error);
+    }
+    res.status(201).json({ table: data });
     return;
   }
   try {
@@ -446,7 +670,7 @@ app.post("/api/staff/tables", staffOnly, activeEvent, (req, res) => {
   }
 });
 
-app.patch("/api/staff/tables/:id", staffOnly, activeEvent, (req, res) => {
+app.patch("/api/staff/tables/:id", staffOnly, activeEvent, async (req, res) => {
   const id = pathParam(req, "id");
   if (!id) {
     res.status(400).json({ error: "Ungültige Tischnummer." });
@@ -455,6 +679,25 @@ app.patch("/api/staff/tables/:id", staffOnly, activeEvent, (req, res) => {
   const body = z.object({ name: z.string().trim().min(1).max(40), active: z.boolean() }).safeParse(req.body);
   if (!body.success) {
     res.status(400).json({ error: "Bitte prüfe den Tischnamen." });
+    return;
+  }
+  if (supabase) {
+    const { data, error } = await supabase.from("tisch_tables").update({
+      name: body.data.name,
+      active: body.data.active,
+    }).eq("id", id).eq("event_id", res.locals.eventId).select("*").maybeSingle();
+    if (error) {
+      if (error.code === "23505") {
+        res.status(409).json({ error: "Diesen Tischnamen gibt es bereits." });
+        return;
+      }
+      throw cloudError(error);
+    }
+    if (!data) {
+      res.status(404).json({ error: "Tisch nicht gefunden." });
+      return;
+    }
+    res.json({ table: data });
     return;
   }
   const result = db.prepare("UPDATE tables SET name = ?, active = ? WHERE id = ? AND event_id = ?").run(body.data.name, Number(body.data.active), id, res.locals.eventId);
