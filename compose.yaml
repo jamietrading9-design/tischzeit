@@ -1,0 +1,18 @@
+services:
+  tischzeit:
+    build: .
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      HOST: 0.0.0.0
+      PORT: 3001
+      NODE_ENV: production
+      DATABASE_PATH: /var/lib/tischzeit/tischzeit.sqlite
+    ports:
+      - "127.0.0.1:3001:3001"
+    volumes:
+      - tischzeit_data:/var/lib/tischzeit
+
+volumes:
+  tischzeit_data:
