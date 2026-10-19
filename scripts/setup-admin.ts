@@ -1,5 +1,5 @@
 import { randomBytes, scryptSync } from "node:crypto";
-import { existsSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { createInterface } from "node:readline";
 import { stdin, stdout } from "node:process";
 import { resolve } from "node:path";
@@ -51,9 +51,6 @@ function askSecret(question: string): Promise<string> {
 
 async function main() {
   const envPath = resolve(process.cwd(), ".env");
-  if (existsSync(envPath)) {
-    throw new Error(".env existiert bereits. Entferne sie nicht; passe die Zugangsdaten bei Bedarf manuell an und starte das Setup erneut nach dem Sichern.");
-  }
   const enteredUsername = (await ask("Benutzername [jamie]: ")).trim();
   const username = enteredUsername || "jamie";
   if (!/^[a-zA-Z0-9._-]{3,64}$/.test(username)) {
@@ -68,12 +65,34 @@ async function main() {
 
   const salt = randomBytes(16);
   const hash = scryptSync(password, salt, 64);
-  const envContents = [
-    `ADMIN_USERNAME=${username}`,
-    `ADMIN_PASSWORD_HASH=${salt.toString("hex")}:${hash.toString("hex")}`,
-    "",
-  ].join("\n");
-  writeFileSync(envPath, envContents, { mode: 0o600, flag: "wx" });
+  const values = {
+    ADMIN_USERNAME: username,
+    ADMIN_PASSWORD_HASH: `${salt.toString("hex")}:${hash.toString("hex")}`,
+  };
+  const lines = existsSync(envPath) ? readFileSync(envPath, "utf8").split(/\r?\n/) : [];
+  if (lines.at(-1) === "") lines.pop();
+  const found = new Set<keyof typeof values>();
+  const updatedLines = lines.map((line) => {
+    const match = /^\s*(?:export\s+)?(ADMIN_USERNAME|ADMIN_PASSWORD_HASH)\s*=/.exec(line);
+    if (!match) return line;
+    const key = match[1];
+    if (key !== "ADMIN_USERNAME" && key !== "ADMIN_PASSWORD_HASH") return line;
+    found.add(key);
+    return `${key}=${values[key]}`;
+  });
+  const keys: Array<keyof typeof values> = ["ADMIN_USERNAME", "ADMIN_PASSWORD_HASH"];
+  for (const key of keys) {
+    if (!found.has(key)) updatedLines.push(`${key}=${values[key]}`);
+  }
+  const tempPath = `${envPath}.${randomBytes(8).toString("hex")}.tmp`;
+  try {
+    writeFileSync(tempPath, `${updatedLines.join("\n")}\n`, { mode: 0o600, flag: "wx" });
+    renameSync(tempPath, envPath);
+    chmodSync(envPath, 0o600);
+  } catch (error) {
+    if (existsSync(tempPath)) unlinkSync(tempPath);
+    throw error;
+  }
   console.log("Admin-Zugang sicher in .env eingerichtet. Die Datei ist von Git ausgeschlossen.");
 }
 
