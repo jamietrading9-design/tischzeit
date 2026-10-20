@@ -13,6 +13,10 @@
     {
       "source": "/datenschutz",
       "destination": "/index.html"
+    },
+    {
+      "source": "/rechnung",
+      "destination": "/index.html"
     }
   ]
 }
