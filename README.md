@@ -49,15 +49,20 @@ supabase db push
 
 ## Included
 
-- Guest menu with table selection, cart, item notes and order confirmation
+- Guest menu with table selection, cart, item notes and a narrow order summary shown directly on the guest's phone
 - Password-protected staff dashboard with live polling, kitchen workflow and cash register
+- Separate administrator and staff roles; administrators can create and suspend staff accounts
 - Multiple isolated events, each with its own menu, tables, QR codes and orders
 - Product and table management, with per-table QR codes
-- Cash payment recording, optional tip and a printable event receipt
+- Cash payment recording, optional tip, searchable receipt history and documented cancellations
+- Pseudonymous customer numbers linked to a random browser cookie; administrators can review orders and block that browser
+- Administrator settings for the event name, welcome text and menu accent color
 - SQLite persistence and request validation
 - German imprint and privacy templates at `/impressum` and `/datenschutz`
 
-The printed event receipt is a simple hospitality receipt, not a certified fiscal receipt or a substitute for a TSE-compliant cash register. This MVP has no online payment, guest accounts, email delivery, or separate staff roles. Do not expose an unconfigured server to the public internet. Before real operation, configure HTTPS and access controls, complete the legal templates with the organizer's information, and verify applicable tax and cash-register requirements with a qualified professional.
+The configured `ADMIN_USERNAME` / `ADMIN_PASSWORD_HASH` account is the initial administrator. Administrators can create staff and additional administrator accounts from the dashboard. Guest customer numbers are pseudonymous and identify a browser, not a verified person; deleting the browser cookie creates a new customer number, so this is not a strong identity or fraud-prevention system. The application does not store IP addresses in customer records.
+
+Before cash payment, the guest sees a mobile-sized order summary, not an invoice. After payment, staff can print a narrow receipt; it is a simple hospitality payment receipt, not a certified fiscal receipt or a substitute for a TSE-compliant cash register. This MVP has no online payment or email delivery. Do not expose an unconfigured server to the public internet. Before real operation, configure HTTPS and access controls, complete the legal templates with the organizer's information, set appropriate retention periods, and verify applicable privacy, tax and cash-register requirements with a qualified professional.
 
 ## API layout
 

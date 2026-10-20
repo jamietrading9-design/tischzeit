@@ -11,10 +11,17 @@ type Table = { id: number; name: string; active?: number };
 type OrderItem = { product_name: string; quantity: number; unit_price_cents: number; note: string };
 type Order = {
   id: string; table_id: number; table_name: string; status: "new" | "preparing" | "ready" | "paid";
-  total_cents: number; tip_cents: number; created_at: string; paid_at: string | null; items: OrderItem[];
+  total_cents: number; tip_cents: number; created_at: string; paid_at: string | null;
+  customer_id: number | null; canceled_at: string | null; cancellation_reason: string | null; canceled_by: string | null;
+  items: OrderItem[];
 };
 type EventSummary = { id: number; name: string; slug: string; created_at: string };
-type PublicData = { venueName: string; eventSlug: string; products: Product[]; tables: Table[] };
+type PublicData = { venueName: string; eventSlug: string; welcomeText: string; accentColor: string; products: Product[]; tables: Table[] };
+type StaffUser = { username: string; role: "admin" | "staff" };
+type CustomerRecord = {
+  id: number; customer_number: string; banned: boolean; ban_reason: string; created_at: string;
+  orders: Array<{ id: string; status: string; total_cents: number; created_at: string; canceled_at: string | null }>;
+};
 
 const ORGANIZATION_NAME = "Jugendfeuerwehr Steinbergkirche";
 const euro = (cents: number) => new Intl.NumberFormat("de-DE", { style: "currency", currency: "EUR" }).format(cents / 100);
@@ -52,10 +59,10 @@ function LegalPage({ kind }: { kind: "imprint" | "privacy" }) {
         <h2>Hinweis zum Veranstaltungsangebot</h2><p>Die Speisekarte und die Bestellmöglichkeit auf dieser Website beziehen sich auf das Angebot des oben genannten Veranstalters. Die Bestellung wird erst mit Annahme durch den Veranstalter verbindlich.</p>
       </> : <>
         <h2>1. Verantwortlicher</h2><p>[Name des Vereins / Veranstalters]<br />[Anschrift]<br />E-Mail: [E-Mail-Adresse]</p>
-        <h2>2. Welche Daten wir verarbeiten</h2><p>Bei einer Bestellung verarbeiten wir die ausgewählten Produkte, einen optionalen Sonderwunsch, die Tischzuordnung und eine zufällig erzeugte Bestellnummer, um die Bestellung zuzubereiten und abzurechnen. Die Anwendung erstellt keine Kundenkonten und fragt keine Namen oder Kontaktdaten von Gästen ab.</p>
+        <h2>2. Welche Daten wir verarbeiten</h2><p>Bei einer Bestellung verarbeiten wir die ausgewählten Produkte, einen optionalen Sonderwunsch, die Tischzuordnung und Bestellzeit. Ein notwendiges, zufälliges Cookie ordnet weitere Bestellungen desselben Browsers derselben pseudonymen Kundenakte und Kundennummer zu. Die Akte enthält Bestellungen und kann bei Missbrauch für weitere Bestellungen gesperrt werden. Namen, Kontaktangaben und IP-Adressen werden von der Anwendung nicht in der Kundenakte gespeichert. Der Hosting-Anbieter kann IP-Adressen nach seinen eigenen Angaben in technischen Protokollen verarbeiten.</p>
         <h2>3. Zweck und Rechtsgrundlage</h2><p>Wir verarbeiten Bestelldaten zur Durchführung der Bestellung und Abrechnung (Art. 6 Abs. 1 lit. b DSGVO). Technisch notwendige Serverprotokolle können zur sicheren Bereitstellung und Fehleranalyse verarbeitet werden (Art. 6 Abs. 1 lit. f DSGVO).</p>
-        <h2>4. Speicherdauer</h2><p>Bestellungen werden lokal in der Datenbank des Veranstalters gespeichert. Bitte legen Sie vor dem produktiven Einsatz eine angemessene Aufbewahrungs- und Löschfrist fest. Gesetzliche Aufbewahrungspflichten für Abrechnungsunterlagen bleiben unberührt.</p>
-        <h2>5. Hosting und Empfänger</h2><p>Im vorgesehenen lokalen Betrieb verbleiben die Daten auf dem Server, auf dem die Anwendung installiert wurde. [Hosting-Anbieter und Drittlandübermittlungen ergänzen, falls zutreffend.]</p>
+        <h2>4. Speicherdauer</h2><p>Bestellungen, Kundenakten, Sperren und dokumentierte Stornierungen werden in der Datenbank des Betreibers gespeichert. Der Betreiber muss vor dem Einsatz passende Löschfristen festlegen und gesetzliche Aufbewahrungspflichten für Abrechnungsunterlagen beachten. Das Geräte-Cookie bleibt bis zu einem Jahr gültig oder bis es im Browser gelöscht wird.</p>
+        <h2>5. Hosting und Empfänger</h2><p>Die Daten werden auf dem für diese Anwendung eingerichteten Hosting- und Datenbankdienst verarbeitet. [Hosting-Anbieter, Auftragsverarbeitung und mögliche Drittlandübermittlungen konkret ergänzen.]</p>
         <h2>6. Ihre Rechte</h2><p>Betroffene Personen haben im Rahmen der gesetzlichen Voraussetzungen Rechte auf Auskunft, Berichtigung, Löschung, Einschränkung der Verarbeitung, Datenübertragbarkeit und Widerspruch. Außerdem besteht ein Beschwerderecht bei einer Datenschutzaufsichtsbehörde.</p>
         <h2>7. Kontakt zum Datenschutz</h2><p>Fragen zum Datenschutz richten Sie bitte an: [E-Mail-Adresse des Veranstalters].</p>
       </>}
@@ -71,12 +78,14 @@ function GuestApp({ eventSlug, requestedTable }: { eventSlug: string; requestedT
   const [notes, setNotes] = useState<Record<number, string>>({});
   const [category, setCategory] = useState("Alles");
   const [order, setOrder] = useState<Order | null>(null);
+  const [customerNumber, setCustomerNumber] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
   useEffect(() => { request<PublicData>(`/api/public/${encodeURIComponent(eventSlug)}`).then(setData).catch((e: Error) => setError(e.message)); }, [eventSlug]);
   const categories = useMemo(() => ["Alles", ...new Set(data?.products.map((p) => p.category) ?? [])], [data]);
   const visibleProducts = data?.products.filter((p) => category === "Alles" || p.category === category) ?? [];
+  const accentColor = data?.accentColor ?? "#963b35";
   const cartCount = Object.values(cart).reduce((sum, count) => sum + count, 0);
   const total = data?.products.reduce((sum, product) => sum + (cart[product.id] ?? 0) * product.price_cents, 0) ?? 0;
   const updateQuantity = (id: number, delta: number) => setCart((current) => {
@@ -88,7 +97,7 @@ function GuestApp({ eventSlug, requestedTable }: { eventSlug: string; requestedT
   const submitOrder = async () => {
     setBusy(true); setError("");
     try {
-      const result = await request<{ order: Order }>(`/api/events/${encodeURIComponent(eventSlug)}/orders`, {
+      const result = await request<{ order: Order; customerNumber: string }>(`/api/events/${encodeURIComponent(eventSlug)}/orders`, {
         method: "POST",
         body: JSON.stringify({
           tableId,
@@ -96,16 +105,17 @@ function GuestApp({ eventSlug, requestedTable }: { eventSlug: string; requestedT
         }),
       });
       setOrder(result.order);
+      setCustomerNumber(result.customerNumber);
       setCart({});
       setNotes({});
     } catch (e) { setError((e as Error).message); } finally { setBusy(false); }
   };
 
   if (!data && !error) return <div className="loading"><div className="brand-mark"><Flame size={19} /></div><span>Speisekarte wird geladen …</span></div>;
-  if (order) return <GuestConfirmation order={order} venueName={data?.venueName ?? ORGANIZATION_NAME} onMore={() => setOrder(null)} />;
+  if (order) return <GuestConfirmation order={order} venueName={data?.venueName ?? ORGANIZATION_NAME} customerNumber={customerNumber} onMore={() => setOrder(null)} />;
 
   return (
-    <main className="guest-page">
+    <main className="guest-page" style={{ "--olive": accentColor, "--olive-dark": accentColor, "--olive-pale": `${accentColor}20` } as React.CSSProperties}>
       <header className="guest-header">
         <a className="brand" href="/"><span className="brand-mark"><Flame size={18} /></span><span className="brand-name">{ORGANIZATION_NAME}</span></a>
       </header>
@@ -113,7 +123,7 @@ function GuestApp({ eventSlug, requestedTable }: { eventSlug: string; requestedT
         <div className="hero-copy">
           <span className="eyebrow"><span className="eyebrow-line" /> SPEISEKARTE</span>
           <h1 className="venue-title">{data?.venueName ?? ORGANIZATION_NAME}<br /><em>Speisekarte.</em></h1>
-          <p>Artikel auswählen und Bestellung an die Küche senden.</p>
+          <p>{data?.welcomeText ?? "Artikel auswählen und Bestellung an die Küche senden."}</p>
           <label className="table-select"><Utensils size={17} /><span>Dein Platz</span>
             <select value={tableId} onChange={(event) => setTableId(Number(event.target.value))}>
               {data?.tables.map((table) => <option key={table.id} value={table.id}>{table.name}</option>)}
@@ -152,19 +162,49 @@ function GuestApp({ eventSlug, requestedTable }: { eventSlug: string; requestedT
   );
 }
 
-function GuestConfirmation({ order, venueName, onMore }: { order: Order; venueName: string; onMore: () => void }) {
+function GuestConfirmation({ order, venueName, customerNumber, onMore }: { order: Order; venueName: string; customerNumber: string; onMore: () => void }) {
   return <main className="confirmation-page">
     <a className="brand" href="/"><span className="brand-mark"><Flame size={18} /></span><span className="brand-name">{ORGANIZATION_NAME}</span></a>
-    <div className="confirmation-card"><div className="confirmation-icon"><BadgeCheck size={34} /></div><span className="eyebrow">BESTELLUNG</span><h1>Bestellung<br /><em>eingegangen.</em></h1><p>Die Küche hat deine Bestellung erhalten.</p>
-      <div className="confirmation-details"><span>Bestellung <strong>#{shortId(order.id)}</strong></span><span>{order.table_name}</span><hr />{order.items.map((item, i) => <span key={`${item.product_name}-${i}`}>{item.quantity} × {item.product_name}<strong>{euro(item.quantity * item.unit_price_cents)}</strong></span>)}<hr /><span>Gesamtbetrag<strong>{euro(order.total_cents)}</strong></span></div>
-      <div className="cash-note"><Banknote size={18} /><span>Bezahlt wird bar an der Kasse.</span></div><button className="text-button" onClick={onMore}>Weiter bestellen <ArrowRight size={16} /></button>
-    </div><span className="confirmation-venue">{venueName}</span>
+    <div className="confirmation-card">
+      <div className="confirmation-icon"><BadgeCheck size={34} /></div>
+      <span className="eyebrow">BESTELLUNG</span>
+      <h1>Bestellung<br /><em>eingegangen.</em></h1>
+      <p>Die Küche hat deine Bestellung erhalten.</p>
+      <section className="guest-order-receipt">
+        <div className="receipt-top">
+          <div className="receipt-brand"><Flame size={16} /> {venueName}</div>
+          <strong className="receipt-heading">Bestellübersicht</strong>
+        </div>
+        <div className="receipt-rule" />
+        <div className="receipt-meta">
+          <span>Bestellung #{shortId(order.id)}</span>
+          <span>Kundennummer {customerNumber}</span>
+          <span>{order.table_name} · {new Date(order.created_at).toLocaleString("de-DE")}</span>
+        </div>
+        <div className="receipt-rule" />
+        {order.items.map((item, index) => (
+          <div className="receipt-item" key={`${item.product_name}-${index}`}>
+            <div className="receipt-line">
+              <span>{item.quantity} × {item.product_name}</span>
+              <strong>{euro(item.quantity * item.unit_price_cents)}</strong>
+            </div>
+            {item.note && <small>{item.note}</small>}
+          </div>
+        ))}
+        <div className="receipt-rule" />
+        <div className="receipt-total"><span>Gesamtbetrag</span><strong>{euro(order.total_cents)}</strong></div>
+        <p className="receipt-legal">Bestellung · noch nicht bezahlt</p>
+      </section>
+      <div className="cash-note"><Banknote size={18} /><span>Bezahlt wird bar an der Kasse.</span></div>
+      <button className="text-button" onClick={onMore}>Weiter bestellen <ArrowRight size={16} /></button>
+    </div>
   </main>;
 }
 
-type StaffTab = "orders" | "kitchen" | "cash" | "menu" | "tables";
+type StaffTab = "orders" | "kitchen" | "cash" | "menu" | "tables" | "history" | "customers" | "users" | "settings";
 function StaffApp() {
   const [username, setUsername] = useState(localStorage.getItem("staff-username") ?? "");
+  const [staffUser, setStaffUser] = useState<StaffUser | null>(null);
   const [password, setPassword] = useState("");
   const [isLoggedIn, setLoggedIn] = useState(false);
   const [events, setEvents] = useState<EventSummary[]>([]);
@@ -195,7 +235,14 @@ function StaffApp() {
   }, [activeEventId]);
 
   useEffect(() => {
-    void refreshEvents().then(() => setLoggedIn(true)).catch(() => setLoggedIn(false));
+    void request<{ user: StaffUser }>("/api/staff/me")
+      .then(({ user }) => {
+        setStaffUser(user);
+        setUsername(user.username);
+        return refreshEvents();
+      })
+      .then(() => setLoggedIn(true))
+      .catch(() => setLoggedIn(false));
   }, [refreshEvents]);
 
   const loadAll = useCallback(async () => {
@@ -222,8 +269,10 @@ function StaffApp() {
   const login = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault(); setError("");
     try {
-      await request("/api/staff/login", { method: "POST", body: JSON.stringify({ username, password }) });
-      localStorage.setItem("staff-username", username);
+      const result = await request<{ user: StaffUser }>("/api/staff/login", { method: "POST", body: JSON.stringify({ username, password }) });
+      setStaffUser(result.user);
+      setUsername(result.user.username);
+      localStorage.setItem("staff-username", result.user.username);
       setPassword("");
       await refreshEvents();
       setLoggedIn(true);
@@ -245,34 +294,44 @@ function StaffApp() {
 
   if (!activeEvent) return <main className="loading"><div className="brand-mark"><Utensils size={19} /></div><span>Veranstaltungen werden geladen …</span></main>;
 
-  const activeOrders = orders.filter((order) => order.status !== "paid");
-  const due = orders.filter((order) => order.status === "ready").reduce((sum, order) => sum + order.total_cents, 0);
+  const activeOrders = orders.filter((order) => order.status !== "paid" && !order.canceled_at);
+  const due = orders.filter((order) => order.status === "ready" && !order.canceled_at).reduce((sum, order) => sum + order.total_cents, 0);
   const nav: Array<{ id: StaffTab; label: string; icon: typeof LayoutDashboard; count?: number }> = [
     { id: "orders", label: "Bestellungen", icon: ShoppingBag, count: activeOrders.filter((o) => o.status === "new").length },
     { id: "kitchen", label: "Küche", icon: ChefHat, count: activeOrders.filter((o) => o.status === "new" || o.status === "preparing").length },
-    { id: "cash", label: "Kasse", icon: Banknote, count: orders.filter((o) => o.status === "ready").length },
+    { id: "cash", label: "Kasse", icon: Banknote, count: orders.filter((o) => o.status === "ready" && !o.canceled_at).length },
     { id: "menu", label: "Speisekarte", icon: Soup },
     { id: "tables", label: "Tische & QR", icon: QrCode },
+    ...(staffUser?.role === "admin" ? [
+      { id: "history" as const, label: "Belege", icon: ReceiptText },
+      { id: "customers" as const, label: "Kunden", icon: ShoppingBag },
+      { id: "users" as const, label: "Benutzer", icon: LayoutDashboard },
+      { id: "settings" as const, label: "Seite", icon: Settings2 },
+    ] : []),
   ];
 
   return <div className="admin-shell">
-    <aside className="sidebar"><a className="brand sidebar-brand" href="/"><span className="brand-mark"><Flame size={18} /></span><span className="brand-name">{ORGANIZATION_NAME}</span></a><div className="sidebar-label">VERANSTALTUNG</div><div className="event-name"><span className="event-icon"><Flame size={17} /></span><select aria-label="Veranstaltung wählen" value={activeEventId} onChange={(event) => { const id = Number(event.target.value); setActiveEventId(id); localStorage.setItem("active-event-id", String(id)); }} className="event-picker">{events.map((item) => <option value={item.id} key={item.id}>{item.name}</option>)}</select><button className="add-event-button" title="Veranstaltung erstellen" onClick={() => setModal("event")}><Plus size={17} /></button></div><div className="sidebar-label nav-label">ARBEITSBEREICH</div><nav className="side-nav">{nav.map(({ id, label, icon: Icon, count }) => <button key={id} onClick={() => setTab(id)} className={`nav-item ${tab === id ? "selected" : ""}`}><Icon size={17} /><span>{label}</span>{count ? <span className="nav-count">{count}</span> : null}</button>)}</nav><div className="sidebar-bottom"><div className="staff-profile"><div className="avatar">{username.slice(0, 2).toUpperCase()}</div><div><strong>{username}</strong><small>Veranstalter</small></div><button title="Abmelden" className="logout-button" onClick={async () => { try { await request("/api/staff/logout", { method: "POST" }); } finally { localStorage.removeItem("staff-username"); setLoggedIn(false); } }}><ArrowDownLeft size={16} /></button></div></div></aside>
+    <aside className="sidebar"><a className="brand sidebar-brand" href="/"><span className="brand-mark"><Flame size={18} /></span><span className="brand-name">{ORGANIZATION_NAME}</span></a><div className="sidebar-label">VERANSTALTUNG</div><div className="event-name"><span className="event-icon"><Flame size={17} /></span><select aria-label="Veranstaltung wählen" value={activeEventId} onChange={(event) => { const id = Number(event.target.value); setActiveEventId(id); localStorage.setItem("active-event-id", String(id)); }} className="event-picker">{events.map((item) => <option value={item.id} key={item.id}>{item.name}</option>)}</select>{staffUser?.role === "admin" && <button className="add-event-button" title="Veranstaltung erstellen" onClick={() => setModal("event")}><Plus size={17} /></button>}</div><div className="sidebar-label nav-label">ARBEITSBEREICH</div><nav className="side-nav">{nav.map(({ id, label, icon: Icon, count }) => <button key={id} onClick={() => setTab(id)} className={`nav-item ${tab === id ? "selected" : ""}`}><Icon size={17} /><span>{label}</span>{count ? <span className="nav-count">{count}</span> : null}</button>)}</nav><div className="sidebar-bottom"><div className="staff-profile"><div className="avatar">{username.slice(0, 2).toUpperCase()}</div><div><strong>{username}</strong><small>{staffUser?.role === "admin" ? "Administrator" : "Personal"}</small></div><button title="Abmelden" className="logout-button" onClick={async () => { try { await request("/api/staff/logout", { method: "POST" }); } finally { localStorage.removeItem("staff-username"); setStaffUser(null); setLoggedIn(false); } }}><ArrowDownLeft size={16} /></button></div></div></aside>
     <main className="admin-main"><header className="admin-topbar"><div className="breadcrumb">{activeEvent.name} <span>/</span> {nav.find((item) => item.id === tab)?.label}</div><div className="topbar-right"><span className="open-indicator">Aktualisiert automatisch</span><button className="icon-button" title="Aktualisieren" onClick={() => void loadAll()}><Clock3 size={18} /></button><div className="avatar small-avatar">{username.slice(0, 2).toUpperCase()}</div></div></header>
       <div className="admin-content">
         {error && <div className="notice error-notice">{error}<button onClick={() => setError("")}><X size={15} /></button></div>}
         {tab === "orders" && <OrdersView orders={orders} setTab={setTab} />}
         {tab === "kitchen" && <KitchenView orders={activeOrders.filter((order) => order.status === "new" || order.status === "preparing")} updateOrder={updateOrder} />}
-        {tab === "cash" && <CashView orders={orders.filter((order) => order.status === "ready")} due={due} onPay={setTipOrder} />}
+        {tab === "cash" && <CashView orders={orders.filter((order) => order.status === "ready" && !order.canceled_at)} due={due} onPay={setTipOrder} />}
         {tab === "menu" && <MenuView products={products} onAdd={() => { setEditingProduct(null); setModal("product"); }} onEdit={(product) => { setEditingProduct(product); setModal("product"); }} onToggle={async (product) => {
           try { await request(`/api/staff/products/${product.id}`, { method: "PATCH", body: JSON.stringify({ ...product, priceCents: product.price_cents, available: !product.available }) }, activeEventId); await loadAll(); } catch (e) { setError((e as Error).message); }
         }} />}
         {tab === "tables" && <TablesView tables={tables} onAdd={() => setModal("table")} onQR={(table) => { setSelectedTable(table); setModal("qr"); }} onToggle={async (table) => {
           try { await request(`/api/staff/tables/${table.id}`, { method: "PATCH", body: JSON.stringify({ name: table.name, active: !table.active }) }, activeEventId); await loadAll(); } catch (e) { setError((e as Error).message); }
         }} />}
+        {tab === "history" && staffUser?.role === "admin" && <OrderHistoryView eventId={activeEventId} onReceipt={(order) => { setReceiptVenueName(activeEvent.name); setReceiptOrder(order); }} />}
+        {tab === "customers" && staffUser?.role === "admin" && <CustomersView />}
+        {tab === "users" && staffUser?.role === "admin" && <AdminUsersView currentUsername={username} />}
+        {tab === "settings" && staffUser?.role === "admin" && <EventSettingsView eventId={activeEventId} eventSlug={activeEvent.slug} eventName={activeEvent.name} onSaved={(name) => setEvents((current) => current.map((event) => event.id === activeEventId ? { ...event, name } : event))} />}
       </div>
       {modal === "product" && <ProductModal product={editingProduct} eventId={activeEventId} onClose={() => setModal(null)} onSaved={async () => { setModal(null); await loadAll(); }} />}
       {modal === "table" && <TableModal eventId={activeEventId} onClose={() => setModal(null)} onSaved={async () => { setModal(null); await loadAll(); }} />}
-      {modal === "event" && <EventModal onClose={() => setModal(null)} onSaved={async (newEvent) => { setEvents((current) => [...current, newEvent]); setActiveEventId(newEvent.id); localStorage.setItem("active-event-id", String(newEvent.id)); setTab("orders"); setModal(null); }} />}
+      {modal === "event" && staffUser?.role === "admin" && <EventModal onClose={() => setModal(null)} onSaved={async (newEvent) => { setEvents((current) => [...current, newEvent]); setActiveEventId(newEvent.id); localStorage.setItem("active-event-id", String(newEvent.id)); setTab("orders"); setModal(null); }} />}
       {modal === "qr" && selectedTable && <QRModal table={selectedTable} eventSlug={activeEvent.slug} onClose={() => setModal(null)} />}
       {tipOrder && <PaymentModal order={tipOrder} onClose={() => setTipOrder(null)} onPay={(tip) => void updateOrder(tipOrder, "paid", tip)} />}
       {receiptOrder && <ReceiptModal order={receiptOrder} venueName={receiptVenueName} onClose={() => setReceiptOrder(null)} />}
@@ -287,11 +346,11 @@ function MetricCard({ label, value, detail, icon: Icon, tone }: { label: string;
   return <div className="metric-card"><div className={`metric-icon ${tone}`}><Icon size={19} /></div><span className="metric-label">{label}</span><strong>{value}</strong><small>{detail}</small></div>;
 }
 function OrdersView({ orders, setTab }: { orders: Order[]; setTab: (tab: StaffTab) => void }) {
-  const open = orders.filter((o) => o.status !== "paid");
-  const todayTotal = orders.reduce((sum, o) => sum + (o.status === "paid" ? o.total_cents + o.tip_cents : 0), 0);
+  const open = orders.filter((o) => o.status !== "paid" && !o.canceled_at);
+  const todayTotal = orders.reduce((sum, o) => sum + (o.status === "paid" && !o.canceled_at ? o.total_cents + o.tip_cents : 0), 0);
   const today = new Intl.DateTimeFormat("de-DE", { weekday: "long", day: "2-digit", month: "long", year: "numeric" }).format(new Date()).toLocaleUpperCase("de-DE");
   return <><PageHeading eyebrow={today} title="Übersicht" detail="Bestellungen, Küche und Tagesumsatz." action={<span className="open-indicator large-indicator">Aktualisiert automatisch</span>} />
-    <div className="metric-grid"><MetricCard label="Offene Bestellungen" value={String(open.length).padStart(2, "0")} detail="Warten auf die Küche" icon={ShoppingBag} tone="tone-coral" /><MetricCard label="In der Küche" value={String(orders.filter((o) => o.status === "preparing").length).padStart(2, "0")} detail="In Zubereitung" icon={ChefHat} tone="tone-amber" /><MetricCard label="Umsatz heute" value={euro(todayTotal)} detail={`${orders.filter((o) => o.status === "paid").length} bezahlt`} icon={Banknote} tone="tone-green" /><MetricCard label="Bereit zur Zahlung" value={String(orders.filter((o) => o.status === "ready").length).padStart(2, "0")} detail="Warten auf die Kasse" icon={ReceiptText} tone="tone-blue" /></div>
+    <div className="metric-grid"><MetricCard label="Offene Bestellungen" value={String(open.length).padStart(2, "0")} detail="Warten auf die Küche" icon={ShoppingBag} tone="tone-coral" /><MetricCard label="In der Küche" value={String(orders.filter((o) => o.status === "preparing" && !o.canceled_at).length).padStart(2, "0")} detail="In Zubereitung" icon={ChefHat} tone="tone-amber" /><MetricCard label="Umsatz heute" value={euro(todayTotal)} detail={`${orders.filter((o) => o.status === "paid" && !o.canceled_at).length} bezahlt`} icon={Banknote} tone="tone-green" /><MetricCard label="Bereit zur Zahlung" value={String(orders.filter((o) => o.status === "ready" && !o.canceled_at).length).padStart(2, "0")} detail="Warten auf die Kasse" icon={ReceiptText} tone="tone-blue" /></div>
     <section className="panel recent-panel"><div className="panel-heading"><div><span className="eyebrow">BESTELLUNGEN</span><h2>Letzte Bestellungen</h2></div><button className="subtle-button" onClick={() => setTab("kitchen")}>Zur Küche <ArrowRight size={15} /></button></div>
     {orders.length ? <div className="order-table-wrap"><table className="order-table"><thead><tr><th>BESTELLUNG</th><th>TISCH</th><th>INHALT</th><th>BETRAG</th><th>STATUS</th><th>ZEIT</th></tr></thead><tbody>{orders.slice(0, 8).map((order) => <tr key={order.id}><td><strong>#{shortId(order.id)}</strong></td><td>{order.table_name}</td><td className="order-content">{order.items.map((i) => `${i.quantity}× ${i.product_name}`).join(", ")}</td><td><strong>{euro(order.total_cents)}</strong></td><td><StatusBadge status={order.status} /></td><td className="time-cell">{new Date(`${order.created_at.replace(" ", "T")}Z`).toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit" })}</td></tr>)}</tbody></table></div> : <EmptyPanel icon={ShoppingBag} title="Keine Bestellungen" text="Bestellungen erscheinen hier." />}</section>
     </>;
@@ -320,6 +379,225 @@ function TablesView({ tables, onAdd, onQR, onToggle }: { tables: Table[]; onAdd:
   const activeCount = tables.filter((t) => t.active).length;
   return <><PageHeading eyebrow="TISCHE & QR-CODES" title="Tische" detail="Für jeden Tisch gibt es einen eigenen QR-Code." action={<button className="primary-button" onClick={onAdd}><Plus size={17} /> Tisch hinzufügen</button>} /><div className="table-summary"><div><span className="summary-number">{String(activeCount).padStart(2, "0")}</span><span>aktive Tische</span></div><span className="summary-note"><QrCode size={17} /> QR-Code scannen und Speisekarte öffnen</span></div>
     <div className="table-grid">{tables.map((table, index) => <article className={`table-card ${!table.active ? "inactive-table" : ""}`} key={table.id}><div className="table-card-top"><span className="table-number">{String(index + 1).padStart(2, "0")}</span><span className={`table-dot ${table.active ? "" : "off-dot"}`} /></div><div className="table-card-name">{table.name}</div><span className="table-card-status">{table.active ? "Bestellen möglich" : "Pausiert"}</span><div className="table-card-actions"><button className="subtle-button" disabled={!table.active} onClick={() => onQR(table)}><QrCode size={15} /> QR-Code</button><button className="text-icon-button" title={table.active ? "Tisch pausieren" : "Tisch aktivieren"} onClick={() => onToggle(table)}><Settings2 size={16} /></button></div></article>)}</div>
+    </>;
+}
+
+function AdminUsersView({ currentUsername }: { currentUsername: string }) {
+    const [users, setUsers] = useState<Array<StaffUser & { active: boolean; created_at?: string }>>([]);
+    const [username, setUsername] = useState("");
+    const [password, setPassword] = useState("");
+    const [role, setRole] = useState<StaffUser["role"]>("staff");
+    const [error, setError] = useState("");
+    const [busy, setBusy] = useState(false);
+    const loadUsers = async () => {
+      try {
+        const result = await request<{ users: typeof users }>("/api/staff/users");
+        setUsers(result.users);
+        setError("");
+      } catch (e) {
+        setError((e as Error).message);
+      }
+    };
+    useEffect(() => { void loadUsers(); }, []);
+    const createUser = async (event: React.FormEvent<HTMLFormElement>) => {
+      event.preventDefault();
+      setBusy(true);
+      setError("");
+      try {
+        await request("/api/staff/users", {
+          method: "POST",
+          body: JSON.stringify({ username, password, role }),
+        });
+        setUsername("");
+        setPassword("");
+        await loadUsers();
+      } catch (e) {
+        setError((e as Error).message);
+      } finally {
+        setBusy(false);
+      }
+    };
+    const setActive = async (user: StaffUser & { active: boolean }) => {
+      try {
+        await request(`/api/staff/users/${encodeURIComponent(user.username)}`, {
+          method: "PATCH",
+          body: JSON.stringify({ active: !user.active }),
+        });
+        await loadUsers();
+      } catch (e) {
+        setError((e as Error).message);
+      }
+    };
+    return <>
+      <PageHeading eyebrow="ZUGÄNGE" title="Benutzer" detail="Konten für den Personalbereich verwalten." />
+      <form className="panel admin-form-panel" onSubmit={createUser}>
+        <h2>Benutzer anlegen</h2>
+        <div className="form-row">
+          <label className="field-label">Benutzername<input className="text-input" required minLength={3} maxLength={64} autoComplete="off" value={username} onChange={(event) => setUsername(event.target.value)} /></label>
+          <label className="field-label">Rolle<select className="text-input" value={role} onChange={(event) => setRole(event.target.value as StaffUser["role"])}><option value="staff">Personal</option><option value="admin">Administrator</option></select></label>
+        </div>
+        <label className="field-label">Startpasswort<input className="text-input" required type="password" minLength={12} maxLength={128} autoComplete="new-password" value={password} onChange={(event) => setPassword(event.target.value)} /><small>Mindestens 12 Zeichen. Teile das Passwort sicher mit der Person.</small></label>
+        {error && <p className="inline-error">{error}</p>}
+        <button className="primary-button" disabled={busy}>{busy ? "Wird angelegt …" : "Benutzer anlegen"} <Plus size={16} /></button>
+      </form>
+      <section className="panel admin-list-panel">
+        <div className="panel-heading"><div><span className="eyebrow">PERSONAL</span><h2>Vorhandene Benutzer</h2></div></div>
+        {users.map((user) => <div className="admin-list-row" key={user.username}>
+          <div><strong>{user.username}</strong><small>{user.role === "admin" ? "Administrator" : "Personal"}{user.username === currentUsername ? " · Du" : ""}</small></div>
+          <span className={`record-state ${user.active ? "record-active" : "record-blocked"}`}>{user.active ? "Aktiv" : "Gesperrt"}</span>
+          <button className="subtle-button" disabled={user.username === currentUsername} onClick={() => void setActive(user)}>{user.active ? "Sperren" : "Freigeben"}</button>
+        </div>)}
+      </section>
+    </>;
+}
+
+function CustomersView() {
+    const [customers, setCustomers] = useState<CustomerRecord[]>([]);
+    const [query, setQuery] = useState("");
+    const [search, setSearch] = useState("");
+    const [error, setError] = useState("");
+    const loadCustomers = async (customerQuery: string) => {
+      try {
+        const result = await request<{ customers: CustomerRecord[] }>(`/api/staff/customers${customerQuery ? `?q=${encodeURIComponent(customerQuery)}` : ""}`);
+        setCustomers(result.customers);
+        setError("");
+      } catch (e) {
+        setError((e as Error).message);
+      }
+    };
+    useEffect(() => { void loadCustomers(""); }, []);
+    const toggleBan = async (customer: CustomerRecord) => {
+      const reason = customer.banned ? "" : window.prompt(`Grund für die Sperre von Kunde ${customer.customer_number}:`);
+      if (!customer.banned && reason === null) return;
+      if (!customer.banned && !reason?.trim()) {
+        setError("Bitte einen Grund für die Sperre angeben.");
+        return;
+      }
+      try {
+        await request(`/api/staff/customers/${customer.id}`, {
+          method: "PATCH",
+          body: JSON.stringify({ banned: !customer.banned, reason: reason ?? "" }),
+        });
+        await loadCustomers(search);
+      } catch (e) {
+        setError((e as Error).message);
+      }
+    };
+    return <>
+      <PageHeading eyebrow="BESTELLER" title="Kundenakten" detail="Kundennummern und zugehörige Bestellungen. Es werden keine IP-Adressen angezeigt." />
+      <form className="customer-search" onSubmit={(event) => { event.preventDefault(); setSearch(query.trim()); void loadCustomers(query.trim()); }}>
+        <label className="field-label">Nach Kundennummer suchen<input className="text-input" inputMode="numeric" placeholder="z. B. 0001" value={query} onChange={(event) => setQuery(event.target.value)} /></label>
+        <button className="primary-button"><ShoppingBag size={16} /> Suchen</button>
+        {search && <button type="button" className="subtle-button" onClick={() => { setSearch(""); setQuery(""); void loadCustomers(""); }}>Alle anzeigen</button>}
+      </form>
+      {error && <div className="notice error-notice">{error}</div>}
+      <section className="customer-list">
+        {customers.map((customer) => <article className="panel customer-card" key={customer.id}>
+          <header className="customer-card-header">
+            <div><span className="eyebrow">KUNDENNUMMER</span><h2>{customer.customer_number}</h2><small>Seit {new Date(`${customer.created_at.replace(" ", "T")}Z`).toLocaleDateString("de-DE")}</small></div>
+            <span className={`record-state ${customer.banned ? "record-blocked" : "record-active"}`}>{customer.banned ? "Gesperrt" : "Aktiv"}</span>
+            <button className={customer.banned ? "subtle-button" : "danger-button"} onClick={() => void toggleBan(customer)}>{customer.banned ? "Sperre aufheben" : "Bestellen sperren"}</button>
+          </header>
+          {customer.banned && customer.ban_reason && <p className="ban-reason">Grund: {customer.ban_reason}</p>}
+          <div className="customer-orders">
+            <strong>{customer.orders.length} Bestellungen</strong>
+            {customer.orders.map((order) => <div className="customer-order-row" key={order.id}>
+              <span>#{shortId(order.id)} · {new Date(`${order.created_at.replace(" ", "T")}Z`).toLocaleString("de-DE")}</span>
+              <strong>{euro(order.total_cents)}</strong>
+              <span>{order.canceled_at ? "Storniert" : order.status === "paid" ? "Bezahlt" : "Offen"}</span>
+            </div>)}
+            {!customer.orders.length && <span className="muted-copy">Noch keine Bestellungen.</span>}
+          </div>
+        </article>)}
+        {!customers.length && <EmptyPanel icon={ShoppingBag} title="Keine Kundenakten gefunden" text="Kundenakten entstehen mit der ersten Bestellung." />}
+      </section>
+    </>;
+}
+
+function OrderHistoryView({ eventId, onReceipt }: { eventId: number; onReceipt: (order: Order) => void }) {
+    const [orders, setOrders] = useState<Order[]>([]);
+    const [query, setQuery] = useState("");
+    const [error, setError] = useState("");
+    const loadHistory = async () => {
+      try {
+        const result = await request<{ orders: Order[] }>("/api/staff/orders/history", {}, eventId);
+        setOrders(result.orders);
+        setError("");
+      } catch (e) {
+        setError((e as Error).message);
+      }
+    };
+    useEffect(() => { void loadHistory(); }, [eventId]);
+    const cancelOrder = async (order: Order) => {
+      const reason = window.prompt(`Stornogrund für Bestellung #${shortId(order.id)}. Eine Rückzahlung wird hier nicht ausgeführt:`);
+      if (reason === null) return;
+      if (reason.trim().length < 3) {
+        setError("Bitte einen Stornogrund mit mindestens 3 Zeichen angeben.");
+        return;
+      }
+      try {
+        await request(`/api/staff/orders/${encodeURIComponent(order.id)}/cancel`, {
+          method: "POST",
+          body: JSON.stringify({ reason }),
+        }, eventId);
+        await loadHistory();
+      } catch (e) {
+        setError((e as Error).message);
+      }
+    };
+    const filteredOrders = orders.filter((order) => order.id.toLowerCase().includes(query.toLowerCase()) || shortId(order.id).includes(query.toUpperCase()));
+    return <>
+      <PageHeading eyebrow="KASSE" title="Belege" detail="Belege früherer Bestellungen ansehen oder mit Grund stornieren. Eine Rückzahlung muss separat erfolgen." />
+      <label className="field-label history-search">Bestellnummer suchen<input className="text-input" placeholder="Bestellnummer" value={query} onChange={(event) => setQuery(event.target.value)} /></label>
+      {error && <div className="notice error-notice">{error}</div>}
+      <section className="panel history-panel">
+        {filteredOrders.length ? filteredOrders.map((order) => <article className="history-row" key={order.id}>
+          <div><strong>#{shortId(order.id)}</strong><small>{order.table_name} · {new Date(`${order.created_at.replace(" ", "T")}Z`).toLocaleString("de-DE")}</small></div>
+          <div><strong>{euro(order.total_cents + (order.status === "paid" ? order.tip_cents : 0))}</strong><small>{order.canceled_at ? `Storniert: ${order.cancellation_reason}` : order.status === "paid" ? "Bezahlt" : "Noch offen"}</small></div>
+          <button className="subtle-button" onClick={() => onReceipt(order)}><ReceiptText size={15} /> Beleg ansehen</button>
+          {!order.canceled_at && <button className="danger-button" onClick={() => void cancelOrder(order)}>Stornieren</button>}
+        </article>) : <EmptyPanel icon={ReceiptText} title="Keine Belege gefunden" text="Für diese Suche gibt es keine Bestellungen." />}
+      </section>
+    </>;
+}
+
+function EventSettingsView({ eventId, eventSlug, eventName, onSaved }: { eventId: number; eventSlug: string; eventName: string; onSaved: (name: string) => void }) {
+    const [name, setName] = useState(eventName);
+    const [welcomeText, setWelcomeText] = useState("");
+    const [accentColor, setAccentColor] = useState("#963b35");
+    const [error, setError] = useState("");
+    const [saved, setSaved] = useState(false);
+    useEffect(() => {
+      setName(eventName);
+      void request<PublicData>(`/api/public/${encodeURIComponent(eventSlug)}`)
+        .then((data) => { setWelcomeText(data.welcomeText); setAccentColor(data.accentColor); })
+        .catch((e: Error) => setError(e.message));
+    }, [eventId, eventSlug, eventName]);
+    const save = async (event: React.FormEvent<HTMLFormElement>) => {
+      event.preventDefault();
+      setError("");
+      setSaved(false);
+      try {
+        await request(`/api/staff/events/${eventId}`, {
+          method: "PATCH",
+          body: JSON.stringify({ name, welcomeText, accentColor }),
+        });
+        onSaved(name);
+        setSaved(true);
+      } catch (e) {
+        setError((e as Error).message);
+      }
+    };
+    return <>
+      <PageHeading eyebrow="DARSTELLUNG" title="Webseite" detail="Veranstaltungsname, Begrüßung und Akzentfarbe auf der Speisekarte ändern." />
+      <form className="panel admin-form-panel" onSubmit={save}>
+        <label className="field-label">Veranstaltungsname<input className="text-input" required minLength={2} maxLength={80} value={name} onChange={(event) => setName(event.target.value)} /></label>
+        <label className="field-label">Begrüßungstext<input className="text-input" required maxLength={180} value={welcomeText} onChange={(event) => setWelcomeText(event.target.value)} /></label>
+        <label className="field-label color-field">Akzentfarbe<input type="color" value={accentColor} onChange={(event) => setAccentColor(event.target.value)} /><span>{accentColor.toUpperCase()}</span></label>
+        {error && <p className="inline-error">{error}</p>}
+        {saved && <p className="save-confirmation">Änderungen gespeichert.</p>}
+        <button className="primary-button">Änderungen speichern <Check size={16} /></button>
+      </form>
     </>;
 }
 
@@ -383,22 +661,21 @@ function PaymentModal({ order, onClose, onPay }: { order: Order; onClose: () => 
   return <ModalShell onClose={onClose}><div className="modal-card"><div className="modal-top"><span className="modal-icon cash-modal-icon"><Banknote size={20} /></span><button className="close-button" onClick={onClose}><X size={19} /></button></div><span className="eyebrow">BARZAHLUNG</span><h2>Zu zahlen: {euro(order.total_cents + tipCents)}</h2><p className="modal-description">{order.table_name} · Bestellung #{shortId(order.id)} · Warenwert {euro(order.total_cents)}</p><label className="field-label">Trinkgeld in Euro<input autoFocus className="text-input" inputMode="decimal" placeholder="0,00" value={tip} onChange={(e) => setTip(e.target.value)} /></label><div className="payment-total"><span>Gesamtbetrag</span><strong>{euro(order.total_cents + tipCents)}</strong></div><div className="modal-actions"><button className="subtle-button" onClick={onClose}>Zurück</button><button className="primary-button" onClick={() => onPay(tipCents)}><Check size={16} /> Zahlung bestätigen</button></div></div></ModalShell>;
 }
 function ReceiptModal({ order, venueName, onClose }: { order: Order; venueName: string; onClose: () => void }) {
-  const paidAt = order.paid_at
-    ? new Date(order.paid_at.endsWith("Z") ? order.paid_at : `${order.paid_at.replace(" ", "T")}Z`)
-    : new Date();
+  const receiptDate = order.paid_at ?? order.created_at;
+  const formattedDate = new Date(receiptDate.endsWith("Z") ? receiptDate : `${receiptDate.replace(" ", "T")}Z`);
   return (
     <ModalShell onClose={onClose}>
       <div className="modal-card receipt-modal">
         <div className="receipt-top">
           <div className="receipt-brand"><Flame size={16} /> {venueName}</div>
-          <strong className="receipt-heading">Kassenbeleg</strong>
+          <strong className="receipt-heading">{order.canceled_at ? "Stornobeleg" : order.status === "paid" ? "Kassenbeleg" : "Bestellübersicht"}</strong>
         </div>
         <div className="receipt-rule" />
         <div className="receipt-meta">
           <span>Bestellung #{shortId(order.id)}</span>
           <span>{order.table_name}</span>
-          <span>{paidAt.toLocaleString("de-DE")}</span>
-          <span>Zahlungsart: Bar</span>
+          <span>{formattedDate.toLocaleString("de-DE")}</span>
+          {order.status === "paid" && <span>Zahlungsart: Bar</span>}
         </div>
         <div className="receipt-rule" />
         {order.items.map((item, index) => (
@@ -420,10 +697,11 @@ function ReceiptModal({ order, venueName, onClose }: { order: Order; venueName: 
           <span>Gesamtbetrag</span>
           <strong>{euro(order.total_cents + order.tip_cents)}</strong>
         </div>
-        <p className="receipt-legal">Zahlungsbeleg · kein TSE-Kassenbeleg</p>
+        {order.canceled_at && <p className="receipt-legal">Storniert von {order.canceled_by ?? "Administrator"} am {new Date(order.canceled_at).toLocaleString("de-DE")}<br />Grund: {order.cancellation_reason}</p>}
+        <p className="receipt-legal">{order.canceled_at ? "Storniert · ursprünglicher Beleg bleibt erhalten" : order.status === "paid" ? "Zahlungsbeleg · kein TSE-Kassenbeleg" : "Bestellübersicht · noch nicht bezahlt"}</p>
         <div className="modal-actions no-print">
           <button className="subtle-button" onClick={onClose}>Schließen</button>
-          <button className="primary-button" onClick={() => window.print()}><Printer size={16} /> Beleg drucken</button>
+          <button className="primary-button" onClick={() => window.print()}><Printer size={16} /> {order.status === "paid" ? "Beleg drucken" : "Übersicht drucken"}</button>
         </div>
       </div>
     </ModalShell>

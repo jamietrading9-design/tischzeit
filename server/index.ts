@@ -29,6 +29,8 @@ db.exec(`
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
     slug TEXT NOT NULL UNIQUE,
+    welcome_text TEXT NOT NULL DEFAULT 'Artikel auswählen und Bestellung an die Küche senden.',
+    accent_color TEXT NOT NULL DEFAULT '#963b35',
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
 `);
@@ -101,6 +103,10 @@ function createScopedSchema() {
     tip_cents INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     paid_at TEXT,
+    customer_id INTEGER,
+    canceled_at TEXT,
+    cancellation_reason TEXT,
+    canceled_by TEXT,
     FOREIGN KEY (event_id, table_id) REFERENCES tables(event_id, id)
   );
   CREATE TABLE IF NOT EXISTS order_items (
@@ -114,9 +120,41 @@ function createScopedSchema() {
   );
   CREATE TABLE IF NOT EXISTS staff_sessions (
     token_hash TEXT PRIMARY KEY,
+    user_id TEXT,
     expires_at TEXT NOT NULL
   );
+  CREATE TABLE IF NOT EXISTS staff_users (
+    username TEXT PRIMARY KEY,
+    password_hash TEXT NOT NULL,
+    role TEXT NOT NULL CHECK (role IN ('admin', 'staff')),
+    active INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  CREATE TABLE IF NOT EXISTS customers (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    identifier_hash TEXT NOT NULL UNIQUE,
+    banned INTEGER NOT NULL DEFAULT 0,
+    ban_reason TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
 `);
+}
+
+function ensureSqliteColumn(table: string, column: string, definition: string) {
+  const columns = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+  if (!columns.some((item) => item.name === column)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${definition}`);
+}
+
+for (const [table, column, definition] of [
+  ["events", "welcome_text", "welcome_text TEXT NOT NULL DEFAULT 'Artikel auswählen und Bestellung an die Küche senden.'"],
+  ["events", "accent_color", "accent_color TEXT NOT NULL DEFAULT '#963b35'"],
+  ["orders", "customer_id", "customer_id INTEGER"],
+  ["orders", "canceled_at", "canceled_at TEXT"],
+  ["orders", "cancellation_reason", "cancellation_reason TEXT"],
+  ["orders", "canceled_by", "canceled_by TEXT"],
+  ["staff_sessions", "user_id", "user_id TEXT"],
+] as const) {
+  ensureSqliteColumn(table, column, definition);
 }
 
 function addEventDefaults(eventId: number) {
@@ -170,11 +208,20 @@ type Order = {
   tip_cents: number;
   created_at: string;
   paid_at: string | null;
+  customer_id: number | null;
+  canceled_at: string | null;
+  cancellation_reason: string | null;
+  canceled_by: string | null;
   items: Array<{ product_name: string; quantity: number; unit_price_cents: number; note: string }>;
 };
-type EventRecord = { id: number; name: string; slug: string; created_at: string };
+type EventRecord = {
+  id: number; name: string; slug: string; created_at: string;
+  welcome_text?: string; accent_color?: string;
+};
+type StaffUser = { username: string; role: "admin" | "staff"; active: boolean };
 
 const sessionCookie = "tischzeit_session";
+const customerCookie = "tischzeit_customer";
 const sessionDurationMs = 8 * 60 * 60 * 1000;
 const failedLogins = new Map<string, { count: number; resetAt: number }>();
 
@@ -211,6 +258,47 @@ async function cloudOrder(id: string, eventId?: number): Promise<Order | undefin
   } as Order;
 }
 
+type CustomerIdentity = { id: number; banned: boolean; ban_reason: string };
+
+async function getOrCreateCustomer(req: Request, res: Response): Promise<CustomerIdentity> {
+  const rawCookie = req.headers.cookie?.split("; ").find((part) => part.startsWith(`${customerCookie}=`));
+  let token = rawCookie?.slice(customerCookie.length + 1);
+  if (!token || !/^[a-f0-9]{64}$/i.test(token)) token = randomBytes(32).toString("hex");
+  const identifierHash = createHash("sha256").update(token).digest("hex");
+  let customer: CustomerIdentity | undefined;
+  if (supabase) {
+    const { data, error } = await supabase.from("tisch_customers").select("id, banned, ban_reason").eq("identifier_hash", identifierHash).maybeSingle();
+    if (error) throw cloudError(error);
+    customer = data as CustomerIdentity | undefined;
+    if (!customer) {
+      const { data: created, error: createError } = await supabase.from("tisch_customers")
+        .insert({ identifier_hash: identifierHash }).select("id, banned, ban_reason").single();
+      if (createError?.code === "23505") {
+        const { data: existing, error: lookupError } = await supabase.from("tisch_customers")
+          .select("id, banned, ban_reason").eq("identifier_hash", identifierHash).single();
+        if (lookupError) throw cloudError(lookupError);
+        customer = existing as CustomerIdentity;
+      } else if (createError) {
+        throw cloudError(createError);
+      } else {
+        customer = created as CustomerIdentity;
+      }
+    }
+  } else {
+    const find = db.prepare("SELECT id, banned, ban_reason FROM customers WHERE identifier_hash = ?");
+    customer = find.get(identifierHash) as CustomerIdentity | undefined;
+    if (!customer) {
+      const created = db.prepare("INSERT OR IGNORE INTO customers (identifier_hash) VALUES (?)").run(identifierHash);
+      customer = find.get(identifierHash) as CustomerIdentity | undefined;
+      if (!customer && created.changes === 0) throw new Error("Die Kundenakte konnte nicht angelegt werden.");
+    }
+  }
+  if (!customer) throw new Error("Die Kundenakte konnte nicht geladen werden.");
+  const secure = process.env.NODE_ENV === "production" ? "; Secure" : "";
+  res.setHeader("Set-Cookie", `${customerCookie}=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=31536000${secure}`);
+  return customer;
+}
+
 const productInput = z.object({
   name: z.string().trim().min(1).max(80),
   description: z.string().trim().max(240).default(""),
@@ -236,18 +324,50 @@ async function staffOnly(req: Request, res: Response, next: NextFunction) {
   }
   const tokenHash = createHash("sha256").update(token).digest("hex");
   const session = supabase
-    ? await supabase.from("tisch_staff_sessions").select("token_hash").eq("token_hash", tokenHash).gt("expires_at", new Date().toISOString()).maybeSingle().then(({ data, error }) => {
+    ? await supabase.from("tisch_staff_sessions").select("token_hash, user_id, tisch_staff_users!inner(username, role, active)").eq("token_hash", tokenHash).gt("expires_at", new Date().toISOString()).maybeSingle().then(({ data, error }) => {
       if (error) throw cloudError(error);
       return data;
     })
-    : db.prepare("SELECT token_hash FROM staff_sessions WHERE token_hash = ? AND expires_at > datetime('now')").get(tokenHash);
-  if (!session) {
+    : db.prepare(`
+      SELECT sessions.token_hash, sessions.user_id, users.username, users.role, users.active
+      FROM staff_sessions AS sessions
+      JOIN staff_users AS users ON users.username = sessions.user_id
+      WHERE sessions.token_hash = ? AND sessions.expires_at > datetime('now')
+    `).get(tokenHash) as { token_hash: string; user_id: string; username: string; role: "admin" | "staff"; active: number } | undefined;
+  const sessionUser = supabase
+    ? (session as { tisch_staff_users?: { username: string; role: "admin" | "staff"; active: boolean } } | null)?.tisch_staff_users
+    : session as { username: string; role: "admin" | "staff"; active: number } | undefined;
+  if (!session || !sessionUser?.active) {
     res.setHeader("Set-Cookie", `${sessionCookie}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0`);
     res.status(401).json({ error: "Deine Sitzung ist abgelaufen. Bitte melde dich erneut an." });
     return;
   }
   res.locals.sessionTokenHash = tokenHash;
+  res.locals.staffUser = {
+    username: sessionUser.username,
+    role: sessionUser.role,
+    active: true,
+  } satisfies StaffUser;
   next();
+}
+
+function adminOnly(_req: Request, res: Response, next: NextFunction) {
+  if ((res.locals.staffUser as StaffUser | undefined)?.role !== "admin") {
+    res.status(403).json({ error: "Diese Funktion ist nur für Administratoren verfügbar." });
+    return;
+  }
+  next();
+}
+
+function makePasswordHash(password: string): string {
+  const salt = randomBytes(16);
+  return `${salt.toString("hex")}:${scryptSync(password, salt, 64).toString("hex")}`;
+}
+
+function verifyPassword(password: string, storedHash: string): boolean {
+  const [saltHex, hashHex] = storedHash.split(":");
+  if (!/^[a-f0-9]{32}$/i.test(saltHex ?? "") || !/^[a-f0-9]{128}$/i.test(hashHex ?? "")) return false;
+  return timingSafeEqual(scryptSync(password, Buffer.from(saltHex, "hex"), 64), Buffer.from(hashHex, "hex"));
 }
 
 async function activeEvent(req: Request, res: Response, next: NextFunction) {
@@ -285,10 +405,21 @@ async function getOrder(id: string): Promise<Order | undefined> {
   return { ...order, items };
 }
 
+function publicOrder(order: Order) {
+  const { customer_id: _customerId, canceled_by: _canceledBy, cancellation_reason: _cancellationReason, ...publicFields } = order;
+  return publicFields;
+}
+
 app.get("/api/public/:slug", async (req, res) => {
   const slug = pathParam(req, "slug");
   const event = slug
-    ? supabase ? await cloudEvent(slug) : db.prepare("SELECT id, name, slug FROM events WHERE slug = ?").get(slug) as EventRecord | undefined
+    ? supabase
+      ? await supabase.from("tisch_events").select("id, name, slug, welcome_text, accent_color, created_at").eq("slug", slug).maybeSingle()
+        .then(({ data, error }) => {
+          if (error) throw cloudError(error);
+          return data as EventRecord | undefined;
+        })
+      : db.prepare("SELECT id, name, slug, welcome_text, accent_color, created_at FROM events WHERE slug = ?").get(slug) as EventRecord | undefined
     : undefined;
   if (!event) {
     res.status(404).json({ error: "Diese Veranstaltung wurde nicht gefunden." });
@@ -307,7 +438,14 @@ app.get("/api/public/:slug", async (req, res) => {
       db.prepare("SELECT id, name, description, category, price_cents FROM products WHERE event_id = ? AND available = 1 ORDER BY category, name").all(event.id),
       db.prepare("SELECT id, name FROM tables WHERE event_id = ? AND active = 1 ORDER BY id").all(event.id),
     ];
-  res.json({ venueName: event.name, eventSlug: event.slug, products, tables });
+  res.json({
+    venueName: event.name,
+    eventSlug: event.slug,
+    welcomeText: event.welcome_text ?? "Artikel auswählen und Bestellung an die Küche senden.",
+    accentColor: event.accent_color ?? "#963b35",
+    products,
+    tables,
+  });
 });
 
 app.post("/api/events/:slug/orders", async (req, res) => {
@@ -325,10 +463,37 @@ app.post("/api/events/:slug/orders", async (req, res) => {
     return;
   }
   if (supabase) {
+    const { data: table, error: tableError } = await supabase.from("tisch_tables").select("id")
+      .eq("event_id", event.id).eq("id", parsed.data.tableId).eq("active", true).maybeSingle();
+    if (tableError) throw cloudError(tableError);
+    if (!table) {
+      res.status(400).json({ error: "Dieser Tisch ist nicht verfügbar." });
+      return;
+    }
+    const productIds = [...new Set(parsed.data.items.map((item) => item.productId))];
+    const { data: products, error: productError } = await supabase.from("tisch_products")
+      .select("id, price_cents").eq("event_id", event.id).eq("available", true).in("id", productIds);
+    if (productError) throw cloudError(productError);
+    const priceByProduct = new Map((products ?? []).map((product) => [product.id, product.price_cents]));
+    if (priceByProduct.size !== productIds.length) {
+      res.status(400).json({ error: "Ein Produkt ist inzwischen nicht mehr verfügbar. Bitte lade die Karte neu." });
+      return;
+    }
+    const total = parsed.data.items.reduce((sum, item) => sum + (priceByProduct.get(item.productId) ?? 0) * item.quantity, 0);
+    if (total > 1000000) {
+      res.status(400).json({ error: "Die Bestellung ist zu groß. Bitte teile sie auf." });
+      return;
+    }
+    const customer = await getOrCreateCustomer(req, res);
+    if (customer.banned) {
+      res.status(403).json({ error: "Bestellungen sind für dieses Gerät nicht möglich." });
+      return;
+    }
     const { data, error: orderError } = await supabase.rpc("tisch_place_order", {
       p_event_slug: event.slug,
       p_table_id: parsed.data.tableId,
       p_items: parsed.data.items,
+      p_customer_id: customer.id,
     });
     if (orderError) {
       if (orderError.code === "P0002") {
@@ -339,9 +504,13 @@ app.post("/api/events/:slug/orders", async (req, res) => {
         res.status(400).json({ error: orderError.message });
         return;
       }
+      if (orderError.code === "42501") {
+        res.status(403).json({ error: "Bestellungen sind für dieses Gerät nicht möglich." });
+        return;
+      }
       throw cloudError(orderError);
     }
-    res.status(201).json({ order: data as Order });
+    res.status(201).json({ order: publicOrder(data as Order), customerNumber: String(customer.id).padStart(4, "0") });
     return;
   }
   const table = db.prepare("SELECT id FROM tables WHERE event_id = ? AND id = ? AND active = 1").get(event.id, parsed.data.tableId);
@@ -364,16 +533,24 @@ app.post("/api/events/:slug/orders", async (req, res) => {
     res.status(400).json({ error: "Die Bestellung ist zu groß. Bitte teile sie auf." });
     return;
   }
+  const customer = await getOrCreateCustomer(req, res);
+  if (customer.banned) {
+    res.status(403).json({ error: "Bestellungen sind für dieses Gerät nicht möglich." });
+    return;
+  }
   const id = randomUUID();
   const createOrder = db.transaction(() => {
-    db.prepare("INSERT INTO orders (id, event_id, table_id, total_cents) VALUES (?, ?, ?, ?)").run(id, event.id, parsed.data.tableId, total);
+    db.prepare("INSERT INTO orders (id, event_id, table_id, total_cents, customer_id) VALUES (?, ?, ?, ?, ?)")
+      .run(id, event.id, parsed.data.tableId, total, customer.id);
     const addItem = db.prepare("INSERT INTO order_items (order_id, product_id, product_name, quantity, unit_price_cents, note) VALUES (?, ?, ?, ?, ?, ?)");
     for (const item of validItems) {
       addItem.run(id, item.product.id, item.product.name, item.quantity, item.product.price_cents, item.note);
     }
   });
   createOrder();
-  res.status(201).json({ order: await getOrder(id) });
+  const order = await getOrder(id);
+  if (!order) throw new Error("Die Bestellung wurde angelegt, konnte aber nicht geladen werden.");
+  res.status(201).json({ order: publicOrder(order), customerNumber: String(customer.id).padStart(4, "0") });
 });
 
 app.get("/api/events/:slug/orders/:id", async (req, res) => {
@@ -391,7 +568,7 @@ app.get("/api/events/:slug/orders/:id", async (req, res) => {
     res.status(404).json({ error: "Bestellung nicht gefunden." });
     return;
   }
-  res.json({ order });
+  res.json({ order: publicOrder(order) });
 });
 
 app.post("/api/staff/login", async (req, res) => {
@@ -411,13 +588,46 @@ app.post("/api/staff/login", async (req, res) => {
     res.status(503).json({ error: "Der Administratorzugang ist noch nicht eingerichtet. Bitte npm run setup:admin ausführen." });
     return;
   }
-  let passwordMatches = false;
-  if (credentials.success && /^[a-f0-9]{32}$/i.test(saltHex) && /^[a-f0-9]{128}$/i.test(hashHex)) {
-    const actual = scryptSync(credentials.data.password, Buffer.from(saltHex, "hex"), 64);
-    const expected = Buffer.from(hashHex, "hex");
-    passwordMatches = timingSafeEqual(actual, expected);
+  const configuredAdminHash = /^[a-f0-9]{32}$/i.test(saltHex) && /^[a-f0-9]{128}$/i.test(hashHex)
+    ? `${saltHex}:${hashHex}`
+    : "";
+  let username = "";
+  let role: StaffUser["role"] = "staff";
+  let authenticated = false;
+  if (credentials.success) {
+    username = credentials.data.username;
+    const configuredAdmin = username === expectedUser && verifyPassword(credentials.data.password, configuredAdminHash);
+    let storedUser: { username: string; password_hash: string; role: "admin" | "staff"; active: boolean } | undefined;
+    if (supabase) {
+      const { data, error } = await supabase.from("tisch_staff_users")
+        .select("username, password_hash, role, active").eq("username", username).maybeSingle();
+      if (error) throw cloudError(error);
+      storedUser = data as typeof storedUser;
+    } else {
+      const row = db.prepare("SELECT username, password_hash, role, active FROM staff_users WHERE username = ?").get(username) as
+        { username: string; password_hash: string; role: "admin" | "staff"; active: number } | undefined;
+      storedUser = row && { ...row, active: Boolean(row.active) };
+    }
+    if (configuredAdmin) {
+      if (supabase) {
+        const { error } = await supabase.from("tisch_staff_users").upsert({
+          username, password_hash: configuredAdminHash, role: "admin", active: true,
+        }, { onConflict: "username" });
+        if (error) throw cloudError(error);
+      } else {
+        db.prepare(`
+          INSERT INTO staff_users (username, password_hash, role, active) VALUES (?, ?, 'admin', 1)
+          ON CONFLICT(username) DO UPDATE SET password_hash = excluded.password_hash, role = 'admin', active = 1
+        `).run(username, configuredAdminHash);
+      }
+      role = "admin";
+      authenticated = true;
+    } else if (storedUser?.active && verifyPassword(credentials.data.password, storedUser.password_hash)) {
+      role = storedUser.role;
+      authenticated = true;
+    }
   }
-  if (!credentials.success || credentials.data.username !== expectedUser || !passwordMatches) {
+  if (!authenticated) {
     const nextCount = attempts && attempts.resetAt > Date.now() ? attempts.count + 1 : 1;
     failedLogins.set(ip, { count: nextCount, resetAt: Date.now() + 15 * 60 * 1000 });
     res.status(401).json({ error: "Benutzername oder Passwort stimmen nicht." });
@@ -431,16 +641,18 @@ app.post("/api/staff/login", async (req, res) => {
     if (cleanupError) throw cloudError(cleanupError);
     const { error } = await supabase.from("tisch_staff_sessions").insert({
       token_hash: tokenHash,
+      user_id: username,
       expires_at: new Date(Date.now() + sessionDurationMs).toISOString(),
     });
     if (error) throw cloudError(error);
   } else {
     db.prepare("DELETE FROM staff_sessions WHERE expires_at <= datetime('now')").run();
-    db.prepare("INSERT INTO staff_sessions (token_hash, expires_at) VALUES (?, datetime('now', '+8 hours'))").run(tokenHash);
+    db.prepare("INSERT INTO staff_sessions (token_hash, user_id, expires_at) VALUES (?, ?, datetime('now', '+8 hours'))")
+      .run(tokenHash, username);
   }
   const secure = process.env.NODE_ENV === "production" ? "; Secure" : "";
   res.setHeader("Set-Cookie", `${sessionCookie}=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${sessionDurationMs / 1000}${secure}`);
-  res.json({ ok: true });
+  res.json({ ok: true, user: { username, role } });
 });
 
 app.post("/api/staff/logout", staffOnly, async (_req, res) => {
@@ -454,6 +666,95 @@ app.post("/api/staff/logout", staffOnly, async (_req, res) => {
   res.json({ ok: true });
 });
 
+app.get("/api/staff/me", staffOnly, (_req, res) => {
+  res.json({ user: res.locals.staffUser });
+});
+
+app.get("/api/staff/users", staffOnly, adminOnly, async (_req, res) => {
+  if (supabase) {
+    const { data, error } = await supabase.from("tisch_staff_users")
+      .select("username, role, active, created_at").order("created_at");
+    if (error) throw cloudError(error);
+    res.json({ users: data });
+    return;
+  }
+  res.json({
+    users: db.prepare("SELECT username, role, active, created_at FROM staff_users ORDER BY created_at").all()
+      .map((user) => ({ ...user as object, active: Boolean((user as { active: number }).active) })),
+  });
+});
+
+app.post("/api/staff/users", staffOnly, adminOnly, async (req, res) => {
+  const body = z.object({
+    username: z.string().trim().regex(/^[a-zA-Z0-9._-]{3,64}$/),
+    password: z.string().min(12).max(128),
+    role: z.enum(["admin", "staff"]),
+  }).safeParse(req.body);
+  if (!body.success) {
+    res.status(400).json({ error: "Benutzername, Passwort oder Rolle sind ungültig. Passwörter brauchen mindestens 12 Zeichen." });
+    return;
+  }
+  const passwordHash = makePasswordHash(body.data.password);
+  if (supabase) {
+    const { data, error } = await supabase.from("tisch_staff_users").insert({
+      username: body.data.username, password_hash: passwordHash, role: body.data.role,
+    }).select("username, role, active, created_at").single();
+    if (error?.code === "23505") {
+      res.status(409).json({ error: "Diesen Benutzernamen gibt es bereits." });
+      return;
+    }
+    if (error) throw cloudError(error);
+    res.status(201).json({ user: data });
+    return;
+  }
+  try {
+    const result = db.prepare("INSERT INTO staff_users (username, password_hash, role) VALUES (?, ?, ?)")
+      .run(body.data.username, passwordHash, body.data.role);
+    if (!result.changes) throw new Error("Der Benutzer konnte nicht angelegt werden.");
+  } catch (error) {
+    if (error instanceof Error && error.message.includes("UNIQUE")) {
+      res.status(409).json({ error: "Diesen Benutzernamen gibt es bereits." });
+      return;
+    }
+    throw error;
+  }
+  res.status(201).json({ user: { username: body.data.username, role: body.data.role, active: true } });
+});
+
+app.patch("/api/staff/users/:username", staffOnly, adminOnly, async (req, res) => {
+  const username = pathParam(req, "username");
+  const body = z.object({ active: z.boolean() }).safeParse(req.body);
+  if (!username || !body.success) {
+    res.status(400).json({ error: "Ungültige Änderung." });
+    return;
+  }
+  const currentUser = res.locals.staffUser as StaffUser;
+  const isConfiguredAdmin = username === process.env.ADMIN_USERNAME;
+  if (username === currentUser.username || isConfiguredAdmin && !body.data.active) {
+    res.status(400).json({ error: "Das aktuell angemeldete Administratorkonto kann nicht gesperrt werden." });
+    return;
+  }
+  if (supabase) {
+    const { data, error } = await supabase.from("tisch_staff_users")
+      .update({ active: body.data.active }).eq("username", username).select("username, role, active").maybeSingle();
+    if (error) throw cloudError(error);
+    if (!data) {
+      res.status(404).json({ error: "Benutzer nicht gefunden." });
+      return;
+    }
+    res.json({ user: data });
+    return;
+  }
+  const result = db.prepare("UPDATE staff_users SET active = ? WHERE username = ?")
+    .run(Number(body.data.active), username);
+  if (!result.changes) {
+    res.status(404).json({ error: "Benutzer nicht gefunden." });
+    return;
+  }
+  res.json({ user: db.prepare("SELECT username, role, active FROM staff_users WHERE username = ?")
+    .get(username) });
+});
+
 app.get("/api/staff/events", staffOnly, async (_req, res) => {
   if (supabase) {
     const { data, error } = await supabase.from("tisch_events").select("id, name, slug, created_at").order("id", { ascending: false });
@@ -464,7 +765,7 @@ app.get("/api/staff/events", staffOnly, async (_req, res) => {
   res.json({ events: db.prepare("SELECT id, name, slug, created_at FROM events ORDER BY id DESC").all() });
 });
 
-app.post("/api/staff/events", staffOnly, async (req, res) => {
+app.post("/api/staff/events", staffOnly, adminOnly, async (req, res) => {
   const body = z.object({ name: z.string().trim().min(2).max(80) }).safeParse(req.body);
   if (!body.success) {
     res.status(400).json({ error: "Der Veranstaltungsname muss mindestens 2 Zeichen haben." });
@@ -486,6 +787,40 @@ app.post("/api/staff/events", staffOnly, async (req, res) => {
     return db.prepare("SELECT id, name, slug, created_at FROM events WHERE id = ?").get(id) as EventRecord;
   });
   res.status(201).json({ event: create() });
+});
+
+app.patch("/api/staff/events/:id", staffOnly, adminOnly, async (req, res) => {
+  const id = Number(pathParam(req, "id"));
+  const body = z.object({
+    name: z.string().trim().min(2).max(80),
+    welcomeText: z.string().trim().min(1).max(180),
+    accentColor: z.string().regex(/^#[0-9a-f]{6}$/i),
+  }).safeParse(req.body);
+  if (!Number.isSafeInteger(id) || id < 1 || !body.success) {
+    res.status(400).json({ error: "Bitte prüfe Name, Begrüßungstext und Farbe." });
+    return;
+  }
+  if (supabase) {
+    const { data, error } = await supabase.from("tisch_events").update({
+      name: body.data.name,
+      welcome_text: body.data.welcomeText,
+      accent_color: body.data.accentColor,
+    }).eq("id", id).select("id, name, slug, welcome_text, accent_color, created_at").maybeSingle();
+    if (error) throw cloudError(error);
+    if (!data) {
+      res.status(404).json({ error: "Veranstaltung nicht gefunden." });
+      return;
+    }
+    res.json({ event: data });
+    return;
+  }
+  const result = db.prepare("UPDATE events SET name = ?, welcome_text = ?, accent_color = ? WHERE id = ?")
+    .run(body.data.name, body.data.welcomeText, body.data.accentColor, id);
+  if (!result.changes) {
+    res.status(404).json({ error: "Veranstaltung nicht gefunden." });
+    return;
+  }
+  res.json({ event: db.prepare("SELECT id, name, slug, welcome_text, accent_color, created_at FROM events WHERE id = ?").get(id) });
 });
 
 app.get("/api/staff/orders", staffOnly, activeEvent, async (_req, res) => {
@@ -517,6 +852,141 @@ app.get("/api/staff/orders", staffOnly, activeEvent, async (_req, res) => {
   res.json({ orders: rows.map((order) => ({ ...order, items: db.prepare("SELECT product_name, quantity, unit_price_cents, note FROM order_items WHERE order_id = ? ORDER BY id").all(order.id) })) });
 });
 
+app.get("/api/staff/orders/history", staffOnly, adminOnly, activeEvent, async (_req, res) => {
+  const eventId = res.locals.eventId as number;
+  if (supabase) {
+    const { data, error } = await supabase.from("tisch_orders").select("id")
+      .eq("event_id", eventId).order("created_at", { ascending: false }).limit(200);
+    if (error) throw cloudError(error);
+    const orders = await Promise.all((data ?? []).map(({ id }) => cloudOrder(id, eventId)));
+    res.json({ orders: orders.filter((order): order is Order => order !== undefined) });
+    return;
+  }
+  const rows = db.prepare(`
+    SELECT orders.*, tables.name AS table_name
+    FROM orders JOIN tables ON tables.id = orders.table_id
+    WHERE orders.event_id = ? ORDER BY orders.created_at DESC LIMIT 200
+  `).all(eventId) as Array<Omit<Order, "items">>;
+  res.json({ orders: rows.map((order) => ({
+    ...order,
+    items: db.prepare("SELECT product_name, quantity, unit_price_cents, note FROM order_items WHERE order_id = ? ORDER BY id").all(order.id),
+  })) });
+});
+
+app.post("/api/staff/orders/:id/cancel", staffOnly, adminOnly, activeEvent, async (req, res) => {
+  const eventId = res.locals.eventId as number;
+  const id = pathParam(req, "id");
+  const body = z.object({ reason: z.string().trim().min(3).max(240) }).safeParse(req.body);
+  if (!id || !body.success) {
+    res.status(400).json({ error: "Bitte einen Stornogrund mit mindestens 3 Zeichen angeben." });
+    return;
+  }
+  const canceledBy = (res.locals.staffUser as StaffUser).username;
+  if (supabase) {
+    const { data, error } = await supabase.from("tisch_orders").update({
+      canceled_at: new Date().toISOString(),
+      cancellation_reason: body.data.reason,
+      canceled_by: canceledBy,
+    }).eq("id", id).eq("event_id", eventId).is("canceled_at", null).select("id").maybeSingle();
+    if (error) throw cloudError(error);
+    if (!data) {
+      res.status(409).json({ error: "Bestellung nicht gefunden oder bereits storniert." });
+      return;
+    }
+    res.json({ order: await cloudOrder(id, eventId) });
+    return;
+  }
+  const update = db.prepare(`
+    UPDATE orders SET canceled_at = datetime('now'), cancellation_reason = ?, canceled_by = ?
+    WHERE id = ? AND event_id = ? AND canceled_at IS NULL
+  `).run(body.data.reason, canceledBy, id, eventId);
+  if (!update.changes) {
+    res.status(409).json({ error: "Bestellung nicht gefunden oder bereits storniert." });
+    return;
+  }
+  res.json({ order: await getOrder(id) });
+});
+
+app.get("/api/staff/customers", staffOnly, adminOnly, async (req, res) => {
+  const rawQuery = typeof req.query.q === "string" ? req.query.q.trim() : "";
+  const query = rawQuery && /^0+$/.test(rawQuery) ? "0" : rawQuery.replace(/^0+/, "");
+  if (supabase) {
+    let customersQuery = supabase.from("tisch_customers").select("id, banned, ban_reason, created_at")
+      .order("id", { ascending: true }).limit(100);
+    if (query) {
+      const id = Number(query);
+      if (!Number.isSafeInteger(id) || id < 1) {
+        res.json({ customers: [] });
+        return;
+      }
+      customersQuery = customersQuery.eq("id", id);
+    }
+    const { data, error } = await customersQuery;
+    if (error) throw cloudError(error);
+    const customers = data ?? [];
+    const ids = customers.map((customer) => customer.id);
+    const { data: orders, error: orderError } = ids.length
+      ? await supabase.from("tisch_orders").select("id, customer_id, event_id, status, total_cents, created_at, canceled_at")
+        .in("customer_id", ids).order("created_at", { ascending: false }).limit(500)
+      : { data: [], error: null };
+    if (orderError) throw cloudError(orderError);
+    res.json({ customers: customers.map((customer) => ({
+      ...customer,
+      customer_number: String(customer.id).padStart(4, "0"),
+      orders: (orders ?? []).filter((order) => order.customer_id === customer.id),
+    })) });
+    return;
+  }
+  const params: Array<string | number> = [];
+  const where = query ? "WHERE customers.id = ?" : "";
+  if (query) params.push(Number(query));
+  const customers = db.prepare(`
+    SELECT id, banned, ban_reason, created_at FROM customers ${where} ORDER BY id LIMIT 100
+  `).all(...params) as Array<{ id: number; banned: number; ban_reason: string; created_at: string }>;
+  res.json({ customers: customers.map((customer) => ({
+    ...customer,
+    banned: Boolean(customer.banned),
+    customer_number: String(customer.id).padStart(4, "0"),
+    orders: db.prepare(`
+      SELECT id, customer_id, event_id, status, total_cents, created_at, canceled_at
+      FROM orders WHERE customer_id = ? ORDER BY created_at DESC LIMIT 100
+    `).all(customer.id),
+  })) });
+});
+
+app.patch("/api/staff/customers/:id", staffOnly, adminOnly, async (req, res) => {
+  const id = Number(pathParam(req, "id"));
+  const body = z.object({ banned: z.boolean(), reason: z.string().trim().max(240).default("") }).safeParse(req.body);
+  if (!Number.isSafeInteger(id) || id < 1 || !body.success) {
+    res.status(400).json({ error: "Ungültige Kundenänderung." });
+    return;
+  }
+  if (supabase) {
+    const { data, error } = await supabase.from("tisch_customers")
+      .update({ banned: body.data.banned, ban_reason: body.data.reason })
+      .eq("id", id).select("id, banned, ban_reason").maybeSingle();
+    if (error) throw cloudError(error);
+    if (!data) {
+      res.status(404).json({ error: "Kundenakte nicht gefunden." });
+      return;
+    }
+    res.json({ customer: { ...data, customer_number: String(data.id).padStart(4, "0") } });
+    return;
+  }
+  const update = db.prepare("UPDATE customers SET banned = ?, ban_reason = ? WHERE id = ?")
+    .run(Number(body.data.banned), body.data.reason, id);
+  if (!update.changes) {
+    res.status(404).json({ error: "Kundenakte nicht gefunden." });
+    return;
+  }
+  res.json({
+    customer: {
+      id, banned: body.data.banned, ban_reason: body.data.reason,
+      customer_number: String(id).padStart(4, "0"),
+    },
+  });
+});
+
 app.patch("/api/staff/orders/:id", staffOnly, activeEvent, async (req, res) => {
   const eventId = res.locals.eventId as number;
   const id = pathParam(req, "id");
@@ -537,7 +1007,7 @@ app.patch("/api/staff/orders/:id", staffOnly, activeEvent, async (req, res) => {
       status: body.data.status,
       ...(body.data.tipCents === undefined ? {} : { tip_cents: body.data.tipCents }),
       ...(body.data.status === "paid" ? { paid_at: new Date().toISOString() } : {}),
-    }).eq("id", id).eq("event_id", eventId).select("id").maybeSingle();
+    }).eq("id", id).eq("event_id", eventId).is("canceled_at", null).select("id").maybeSingle();
     if (update.error) throw cloudError(update.error);
     if (!update.data) {
       res.status(404).json({ error: "Bestellung nicht gefunden." });
@@ -549,7 +1019,7 @@ app.patch("/api/staff/orders/:id", staffOnly, activeEvent, async (req, res) => {
   const update = db.prepare(`
     UPDATE orders SET status = ?, tip_cents = COALESCE(?, tip_cents),
       paid_at = CASE WHEN ? = 'paid' THEN datetime('now') ELSE paid_at END
-    WHERE id = ? AND event_id = ?
+    WHERE id = ? AND event_id = ? AND canceled_at IS NULL
   `).run(body.data.status, body.data.tipCents ?? null, body.data.status, id, eventId);
   if (update.changes === 0) {
     res.status(404).json({ error: "Bestellung nicht gefunden." });
