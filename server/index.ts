@@ -411,7 +411,11 @@ async function staffOnly(req: Request, res: Response, next: NextFunction) {
       .eq("token_hash", tokenHash).gt("expires_at", new Date().toISOString()).maybeSingle()
       .then(({ data, error }) => {
         if (error) throw cloudError(error);
-        return data as { token_hash: string; user_id: string; created_at: string; expires_at: string; tisch_staff_users?: { username: string; role: "admin" | "staff"; role_id: string | null; active: boolean } } | null;
+        return data as {
+          token_hash: string; user_id: string; created_at: string; expires_at: string;
+          tisch_staff_users?: { username: string; role: "admin" | "staff"; role_id: string | null; active: boolean }
+            | Array<{ username: string; role: "admin" | "staff"; role_id: string | null; active: boolean }>;
+        } | null;
       })
     : db.prepare(`
       SELECT sessions.token_hash, sessions.user_id, sessions.created_at, sessions.expires_at, users.username, users.role, users.role_id, users.active
