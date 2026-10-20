@@ -403,7 +403,8 @@ async function staffOnly(req: Request, res: Response, next: NextFunction) {
   const session: {
     token_hash: string; user_id: string;
     created_at: string; expires_at: string;
-    tisch_staff_users?: { username: string; role: "admin" | "staff"; role_id: string | null; active: boolean };
+    tisch_staff_users?: { username: string; role: "admin" | "staff"; role_id: string | null; active: boolean }
+      | Array<{ username: string; role: "admin" | "staff"; role_id: string | null; active: boolean }>;
   } | { token_hash: string; user_id: string; username: string; role: "admin" | "staff"; role_id: string | null; active: number } | null | undefined = supabase
     ? await supabase.from("tisch_staff_sessions")
       .select("token_hash, user_id, created_at, expires_at, tisch_staff_users!inner(username, role, role_id, active)")
@@ -418,12 +419,12 @@ async function staffOnly(req: Request, res: Response, next: NextFunction) {
       JOIN staff_users AS users ON users.username = sessions.user_id
       WHERE sessions.token_hash = ? AND sessions.expires_at > datetime('now')
     `).get(tokenHash) as { token_hash: string; user_id: string; created_at: string; expires_at: string; username: string; role: "admin" | "staff"; role_id: string | null; active: number } | undefined;
+  const relationUser = session && "tisch_staff_users" in session ? session.tisch_staff_users : undefined;
   const sessionUser: { username: string; role: "admin" | "staff"; role_id: string | null; active: boolean | number } | undefined =
-    session && "tisch_staff_users" in session
-      ? session.tisch_staff_users
-      : session && "username" in session
+    Array.isArray(relationUser) ? relationUser[0]
+      : relationUser ?? (session && "username" in session
         ? { username: session.username, role: session.role, role_id: session.role_id, active: Boolean(session.active) }
-        : undefined;
+        : undefined);
   if (!session || !sessionUser?.active) {
     res.setHeader("Set-Cookie", `${sessionCookie}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0`);
     res.status(401).json({ error: "Deine Sitzung ist abgelaufen. Bitte melde dich erneut an." });
